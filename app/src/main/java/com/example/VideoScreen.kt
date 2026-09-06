@@ -852,29 +852,33 @@ fun LocalLibraryContent(
                     SwipeToDismissBox(
                         state = dismissState,
                         enableDismissFromStartToEnd = false,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 4.dp),
                         backgroundContent = {
-                            Box(
-                                modifier = Modifier
-                                    .fillMaxSize()
-                                    .padding(horizontal = 16.dp)
-                                    .background(ErrorContainerDark, RoundedCornerShape(12.dp))
-                                    .padding(horizontal = 20.dp),
-                                contentAlignment = Alignment.CenterEnd
-                            ) {
-                                Icon(Icons.Default.Delete, contentDescription = "Delete", tint = OnErrorContainerDark)
+                            val isDismissing = dismissState.dismissDirection == SwipeToDismissBoxValue.EndToStart
+                            if (isDismissing) {
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxSize()
+                                        .clip(RoundedCornerShape(12.dp))
+                                        .background(ErrorContainerDark)
+                                        .padding(horizontal = 20.dp),
+                                    contentAlignment = Alignment.CenterEnd
+                                ) {
+                                    Icon(Icons.Default.Delete, contentDescription = "Delete", tint = OnErrorContainerDark)
+                                }
                             }
                         },
                         content = {
-                            Box(modifier = Modifier.padding(horizontal = 16.dp)) {
-                                VideoListItemCard(
-                                    video = video,
-                                    imageLoader = imageLoader,
-                                    onClick = { onVideoSelected(video) },
-                                    onLongClick = { onVideoLongClick(video) },
-                                    onDeleteClick = { onDeleteRequested(video) },
-                                    onInfoClick = { onInfoRequested(video) }
-                                )
-                            }
+                            VideoListItemCard(
+                                video = video,
+                                imageLoader = imageLoader,
+                                onClick = { onVideoSelected(video) },
+                                onLongClick = { onVideoLongClick(video) },
+                                onDeleteClick = { onDeleteRequested(video) },
+                                onInfoClick = { onInfoRequested(video) }
+                            )
                         }
                     )
                 }
@@ -1247,6 +1251,7 @@ private fun handleFolderTint(name: String): Color {
 fun VideoListItemCard(
     video: VideoItem,
     imageLoader: ImageLoader,
+    modifier: Modifier = Modifier,
     onClick: () -> Unit,
     onLongClick: () -> Unit = {},
     onDeleteClick: () -> Unit = {},
@@ -1258,9 +1263,8 @@ fun VideoListItemCard(
     Card(
         shape = RoundedCornerShape(12.dp),
         colors = CardDefaults.cardColors(containerColor = SurfaceContainerDark),
-        modifier = Modifier
+        modifier = modifier
             .fillMaxWidth()
-            .padding(vertical = 4.dp)
             .combinedClickable(
                 onClick = onClick,
                 onLongClick = {
