@@ -5,6 +5,7 @@ on:
     branches: [ "main", "master", "develop", "release/**" ]
     tags:
       - 'v*'
+      - '[0-9]+.*'
   pull_request:
     branches: [ "main", "master", "develop" ]
   workflow_dispatch:
@@ -22,7 +23,7 @@ on:
       publish_release:
         description: 'Publish to GitHub Releases'
         required: false
-        default: false
+        default: true
         type: boolean
       release_tag:
         description: 'Custom tag name for release (leave blank for auto)'
@@ -148,25 +149,62 @@ jobs:
           path: app/build/outputs/bundle/release/*.aab
           retention-days: 30
 
+      - name: Prepare Release Assets
+        if: |
+          github.event_name != 'pull_request' &&
+          (
+            startsWith(github.ref, 'refs/tags/') ||
+            github.ref == 'refs/heads/main' ||
+            github.ref == 'refs/heads/master' ||
+            (github.event_name == 'workflow_dispatch' && github.event.inputs.publish_release != 'false')
+          )
+        run: |
+          mkdir -p release-assets
+          for f in app/build/outputs/apk/release/*.apk; do
+            if [ -f "$f" ]; then
+              cp "$f" release-assets/VDOFLY-release.apk
+              break
+            fi
+          done
+          for f in app/build/outputs/apk/debug/*.apk; do
+            if [ -f "$f" ]; then
+              cp "$f" release-assets/VDOFLY-debug.apk
+              break
+            fi
+          done
+          for f in app/build/outputs/bundle/release/*.aab; do
+            if [ -f "$f" ]; then
+              cp "$f" release-assets/VDOFLY-release.aab
+              break
+            fi
+          done
+          echo "Release assets ready:"
+          ls -lh release-assets/
+
       - name: Publish to GitHub Releases
-        if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.publish_release == true)
+        if: |
+          github.event_name != 'pull_request' &&
+          (
+            startsWith(github.ref, 'refs/tags/') ||
+            github.ref == 'refs/heads/main' ||
+            github.ref == 'refs/heads/master' ||
+            (github.event_name == 'workflow_dispatch' && github.event.inputs.publish_release != 'false')
+          )
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || inputs.release_tag || format('v1.0.{0}', github.run_number) }}
-          name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || inputs.release_tag || format('VDOFLY v1.0.{0} Release', github.run_number) }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+          tag_name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || (github.event.inputs.release_tag != '' && github.event.inputs.release_tag) || format('v1.0.{0}', github.run_number) }}
+          name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || (github.event.inputs.release_tag != '' && github.event.inputs.release_tag) || format('VDOFLY v1.0.{0} Release', github.run_number) }}
           body: |
             ## VDOFLY Android Release
             
             ### Included Assets:
-            - **Release APK**: Signed production APK for direct device installation
-            - **Debug APK**: Debug build for testing and diagnostics
-            - **Android App Bundle (AAB)**: Production bundle for Google Play Store distribution
+            - **VDOFLY-release.apk**: Signed production APK for direct device installation
+            - **VDOFLY-debug.apk**: Debug build for testing and diagnostics
+            - **VDOFLY-release.aab**: Production bundle for Google Play Store distribution
             
             *Build: ${{ github.run_number }} (${{ github.sha }})*
-          files: |
-            app/build/outputs/apk/release/*.apk
-            app/build/outputs/apk/debug/*.apk
-            app/build/outputs/bundle/release/*.aab
+          files: release-assets/*
           fail_on_unmatched_files: false
           make_latest: true
           generate_release_notes: true
