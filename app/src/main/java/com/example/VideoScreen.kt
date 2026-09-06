@@ -12,6 +12,8 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Sort
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.FolderOff
 import androidx.compose.material.icons.filled.MoreVert
@@ -43,6 +45,9 @@ fun VideoScreen(
     val videos by viewModel.videos.collectAsStateWithLifecycle()
     val filteredVideos by viewModel.filteredVideos.collectAsStateWithLifecycle()
     val searchQuery by viewModel.searchQuery.collectAsStateWithLifecycle()
+    val sortOrder by viewModel.sortOrder.collectAsStateWithLifecycle()
+
+    var showSortMenu by remember { mutableStateOf(false) }
 
     val permissionToRequest = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
         Manifest.permission.READ_MEDIA_VIDEO
@@ -79,6 +84,38 @@ fun VideoScreen(
                             fontWeight = FontWeight.Bold,
                             style = MaterialTheme.typography.titleLarge
                         )
+                    }
+                },
+                actions = {
+                    Box {
+                        IconButton(onClick = { showSortMenu = true }) {
+                            Icon(Icons.Default.Sort, contentDescription = "Sort", tint = MaterialTheme.colorScheme.onBackground)
+                        }
+                        DropdownMenu(
+                            expanded = showSortMenu,
+                            onDismissRequest = { showSortMenu = false }
+                        ) {
+                            DropdownMenuItem(
+                                text = { Text("Date Added") },
+                                onClick = { viewModel.setSortOrder(SortOrder.DATE_ADDED); showSortMenu = false },
+                                leadingIcon = { if (sortOrder == SortOrder.DATE_ADDED) Icon(Icons.Default.MoreVert, null) }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Duration") },
+                                onClick = { viewModel.setSortOrder(SortOrder.DURATION); showSortMenu = false },
+                                leadingIcon = { if (sortOrder == SortOrder.DURATION) Icon(Icons.Default.MoreVert, null) }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Size") },
+                                onClick = { viewModel.setSortOrder(SortOrder.SIZE); showSortMenu = false },
+                                leadingIcon = { if (sortOrder == SortOrder.SIZE) Icon(Icons.Default.MoreVert, null) }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Name") },
+                                onClick = { viewModel.setSortOrder(SortOrder.NAME); showSortMenu = false },
+                                leadingIcon = { if (sortOrder == SortOrder.NAME) Icon(Icons.Default.MoreVert, null) }
+                            )
+                        }
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
@@ -189,9 +226,44 @@ fun VideoScreen(
                             verticalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
                             itemsIndexed(filteredVideos, key = { _, it -> it.id }) { index, video ->
-                                VideoItemCard(
-                                    video = video,
-                                    onClick = { onVideoSelected(index) }
+                                val dismissState = rememberSwipeToDismissBoxState(
+                                    confirmValueChange = {
+                                        if (it == SwipeToDismissBoxValue.EndToStart) {
+                                            viewModel.deleteVideo(video.uri)
+                                            true
+                                        } else {
+                                            false
+                                        }
+                                    }
+                                )
+                                SwipeToDismissBox(
+                                    state = dismissState,
+                                    enableDismissFromStartToEnd = false,
+                                    backgroundContent = {
+                                        val color = when (dismissState.targetValue) {
+                                            SwipeToDismissBoxValue.EndToStart -> MaterialTheme.colorScheme.errorContainer
+                                            else -> Color.Transparent
+                                        }
+                                        Box(
+                                            modifier = Modifier
+                                                .fillMaxSize()
+                                                .background(color, RoundedCornerShape(12.dp))
+                                                .padding(horizontal = 20.dp),
+                                            contentAlignment = Alignment.CenterEnd
+                                        ) {
+                                            Icon(
+                                                Icons.Default.Delete,
+                                                contentDescription = "Delete",
+                                                tint = MaterialTheme.colorScheme.onErrorContainer
+                                            )
+                                        }
+                                    },
+                                    content = {
+                                        VideoItemCard(
+                                            video = video,
+                                            onClick = { onVideoSelected(index) }
+                                        )
+                                    }
                                 )
                             }
                         }
