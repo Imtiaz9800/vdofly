@@ -247,6 +247,16 @@ class VideoViewModel(application: Application) : AndroidViewModel(application) {
         _videoPositions.value = _videoPositions.value + (uri to position)
     }
 
+    fun clearPlaybackHistory() {
+        viewModelScope.launch {
+            getApplication<Application>().dataStore.edit { prefs ->
+                prefs.clear()
+            }
+            _videoPositions.value = emptyMap()
+            showToast("Playback history cleared")
+        }
+    }
+
     suspend fun getVideoPosition(uri: String): Long {
         val key = longPreferencesKey(uri)
         val prefs = getApplication<Application>().dataStore.data.first()
