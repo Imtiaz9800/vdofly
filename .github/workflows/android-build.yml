@@ -50,6 +50,9 @@ jobs:
         with:
           cache-read-only: ${{ github.ref != 'refs/heads/main' && github.ref != 'refs/heads/master' }}
 
+      - name: Grant execute permission for gradlew
+        run: chmod +x gradlew
+
       - name: Prepare environment configuration
         run: |
           if [ ! -f .env ]; then
