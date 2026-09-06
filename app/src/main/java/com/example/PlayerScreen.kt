@@ -1,5 +1,6 @@
 package com.example
 
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.media3.common.C
 import androidx.media3.common.TrackSelectionOverride
@@ -13,10 +14,12 @@ import android.view.ViewGroup
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.compose.animation.core.*
+import androidx.compose.ui.draw.clip
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.CornerSize
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
@@ -29,6 +32,9 @@ import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.SkipPrevious
 import androidx.compose.material.icons.filled.FastForward
 import androidx.compose.material.icons.filled.FastRewind
+import androidx.compose.material.icons.filled.BrightnessHigh
+import androidx.compose.material.icons.filled.VolumeUp
+import androidx.compose.material.icons.filled.VolumeOff
 import android.app.PictureInPictureParams
 import android.os.Build
 import android.util.Rational
@@ -40,9 +46,12 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.Lifecycle
@@ -68,6 +77,7 @@ fun PlayerScreen(
     val activity = context as? ComponentActivity
     
     val videos by viewModel.videos.collectAsStateWithLifecycle()
+    var currentMediaIndex by remember { mutableIntStateOf(initialIndex) }
 
     val exoPlayer = remember {
         ExoPlayer.Builder(context).build().apply {
@@ -84,7 +94,7 @@ fun PlayerScreen(
     }
     
     var isPlaying by remember { mutableStateOf(exoPlayer.isPlaying) }
-    var isControlsVisible by remember { mutableStateOf(false) }
+    var isControlsVisible by remember { mutableStateOf(true) }
     
     var sleepTimerMinutes by remember { mutableStateOf(0) }
     var showSleepTimerDialog by remember { mutableStateOf(false) }
@@ -136,14 +146,17 @@ fun PlayerScreen(
         }
     }
 
+    LaunchedEffect(isControlsVisible, isPlaying) {
+        if (isControlsVisible && isPlaying && !isSeeking) {
+            delay(4500L)
+            isControlsVisible = false
+        }
+    }
+
     DisposableEffect(exoPlayer) {
         val listener = object : Player.Listener {
             override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
-                if (mediaItem != null) {
-                    // When transitioning to a new item automatically or manually, we might want to load its saved position.
-                    // But usually, transition means starting fresh unless manually selected from a list.
-                    // For simplicity, we'll just let ExoPlayer handle transitions naturally from 0.
-                }
+                currentMediaIndex = exoPlayer.currentMediaItemIndex
             }
             override fun onIsPlayingChanged(isPlayingState: Boolean) {
                 isPlaying = isPlayingState
@@ -204,7 +217,21 @@ fun PlayerScreen(
         GestureOverlay(exoPlayer, onTap = { isControlsVisible = !isControlsVisible })
         
         if (isControlsVisible) {
+            val currentVideo = videos.getOrNull(currentMediaIndex)
+            val currentTitle = currentVideo?.name ?: (exoPlayer.currentMediaItem?.mediaMetadata?.title?.toString() ?: "Playing Video")
+            val currentSubtitle = buildString {
+                if (currentVideo != null) {
+                    append(currentVideo.resolution)
+                    if (currentVideo.bucketName.isNotBlank()) {
+                        append(" • ")
+                        append(currentVideo.bucketName)
+                    }
+                }
+            }
+
             ControlsOverlay(
+                videoTitle = currentTitle,
+                videoSubtitle = currentSubtitle,
                 isPlaying = isPlaying,
                 sleepTimerMinutes = sleepTimerMinutes,
                 currentPosition = currentPosition,
@@ -266,7 +293,8 @@ fun PlayerScreen(
         if (showSleepTimerDialog) {
             AlertDialog(
                 onDismissRequest = { showSleepTimerDialog = false },
-                title = { Text("Sleep Timer") },
+                containerColor = MaterialTheme.colorScheme.surfaceContainer,
+                title = { Text("Sleep Timer", color = MaterialTheme.colorScheme.onSurface) },
                 text = {
                     Column {
                         listOf(0, 15, 30, 45, 60).forEach { mins ->
@@ -284,17 +312,21 @@ fun PlayerScreen(
                             ) {
                                 RadioButton(
                                     selected = sleepTimerMinutes == mins,
-                                    onClick = null
+                                    onClick = null,
+                                    colors = RadioButtonDefaults.colors(
+                                        selectedColor = MaterialTheme.colorScheme.primary,
+                                        unselectedColor = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
                                 )
                                 Spacer(modifier = Modifier.width(16.dp))
-                                Text(text = label)
+                                Text(text = label, color = MaterialTheme.colorScheme.onSurface)
                             }
                         }
                     }
                 },
                 confirmButton = {
                     TextButton(onClick = { showSleepTimerDialog = false }) {
-                        Text("Close")
+                        Text("Close", color = MaterialTheme.colorScheme.primary)
                     }
                 }
             )
@@ -303,13 +335,15 @@ fun PlayerScreen(
             val audioGroups = exoPlayer.currentTracks.groups.filter { it.type == C.TRACK_TYPE_AUDIO }
             AlertDialog(
                 onDismissRequest = { showAudioTrackDialog = false },
-                title = { Text("Select Audio Track") },
+                containerColor = MaterialTheme.colorScheme.surfaceContainer,
+                title = { Text("Select Audio Track", color = MaterialTheme.colorScheme.onSurface) },
                 text = {
                     LazyColumn {
                         if (audioGroups.isEmpty()) {
                             item {
                                 Text(
                                     text = "No additional audio tracks found.",
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     modifier = Modifier.padding(16.dp)
                                 )
                             }
@@ -335,15 +369,22 @@ fun PlayerScreen(
                                     .padding(16.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                RadioButton(selected = isSelected, onClick = null)
+                                RadioButton(
+                                    selected = isSelected,
+                                    onClick = null,
+                                    colors = RadioButtonDefaults.colors(
+                                        selectedColor = MaterialTheme.colorScheme.primary,
+                                        unselectedColor = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                )
                                 Spacer(modifier = Modifier.width(16.dp))
-                                Text("Track ${groupIndex + 1}: $language")
+                                Text("Track ${groupIndex + 1}: $language", color = MaterialTheme.colorScheme.onSurface)
                             }
                         }
                     }
                 },
                 confirmButton = {
-                    TextButton(onClick = { showAudioTrackDialog = false }) { Text("Close") }
+                    TextButton(onClick = { showAudioTrackDialog = false }) { Text("Close", color = MaterialTheme.colorScheme.primary) }
                 }
             )
         }
@@ -364,6 +405,8 @@ fun formatTime(ms: Long): String {
 
 @Composable
 fun ControlsOverlay(
+    videoTitle: String,
+    videoSubtitle: String,
     isPlaying: Boolean,
     sleepTimerMinutes: Int,
     currentPosition: Long,
@@ -382,68 +425,126 @@ fun ControlsOverlay(
     onBack: () -> Unit
 ) {
     Box(modifier = Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.5f))) {
-        IconButton(
-            onClick = onBack,
-            modifier = Modifier.align(Alignment.TopStart).padding(16.dp).statusBarsPadding()
-        ) {
-            Icon(
-                imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                contentDescription = "Back",
-                tint = Color.White
-            )
-        }
-        
-        Row(
-            modifier = Modifier.align(Alignment.TopEnd).padding(16.dp).statusBarsPadding()
-        ) {
-            IconButton(onClick = onAudioTrack) {
-                Icon(
-                    imageVector = Icons.Filled.Audiotrack,
-                    contentDescription = "Audio Track",
-                    tint = Color.White
-                )
-            }
-            IconButton(onClick = onSleepTimer) {
-                Box {
-                    Icon(
-                        imageVector = Icons.Filled.Timer,
-                        contentDescription = "Sleep Timer",
-                        tint = if (sleepTimerMinutes > 0) MaterialTheme.colorScheme.primary else Color.White
-                    )
-                    if (sleepTimerMinutes > 0) {
-                        Text(
-                            text = "$sleepTimerMinutes",
-                            color = MaterialTheme.colorScheme.primary,
-                            style = MaterialTheme.typography.labelSmall,
-                            modifier = Modifier
-                                .align(Alignment.BottomEnd)
-                                .background(Color.Black.copy(alpha = 0.5f), MaterialTheme.shapes.small)
-                                .padding(horizontal = 2.dp)
+        // Top Header Bar with File Name and Action Controls
+        Box(
+            modifier = Modifier
+                .align(Alignment.TopCenter)
+                .fillMaxWidth()
+                .background(
+                    Brush.verticalGradient(
+                        colors = listOf(
+                            Color.Black.copy(alpha = 0.85f),
+                            Color.Black.copy(alpha = 0.4f),
+                            Color.Transparent
                         )
+                    )
+                )
+                .statusBarsPadding()
+                .padding(horizontal = 8.dp, vertical = 6.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                IconButton(onClick = onBack) {
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                        contentDescription = "Back",
+                        tint = Color.White
+                    )
+                }
+
+                Column(
+                    modifier = Modifier
+                        .weight(1f)
+                        .padding(horizontal = 8.dp)
+                ) {
+                    Text(
+                        text = videoTitle,
+                        color = Color.White,
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    if (videoSubtitle.isNotBlank()) {
+                        Spacer(modifier = Modifier.height(2.dp))
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Surface(
+                                shape = RoundedCornerShape(4.dp),
+                                color = MaterialTheme.colorScheme.primary.copy(alpha = 0.25f)
+                            ) {
+                                Text(
+                                    text = "HW+",
+                                    color = MaterialTheme.colorScheme.primary,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontWeight = FontWeight.Bold,
+                                    modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
+                                )
+                            }
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = videoSubtitle,
+                                color = Color.White.copy(alpha = 0.7f),
+                                style = MaterialTheme.typography.labelSmall,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
                     }
                 }
-            }
-            IconButton(onClick = onSpeed) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Icon(
-                        imageVector = Icons.Filled.Speed,
-                        contentDescription = "Playback Speed",
-                        tint = Color.White
-                    )
-                    Text(
-                        text = "${currentSpeed}x",
-                        color = Color.White,
-                        style = MaterialTheme.typography.labelSmall
-                    )
-                }
-            }
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                IconButton(onClick = onPip) {
-                    Icon(
-                        imageVector = Icons.Filled.PictureInPictureAlt,
-                        contentDescription = "Picture in Picture",
-                        tint = Color.White
-                    )
+
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    IconButton(onClick = onAudioTrack) {
+                        Icon(
+                            imageVector = Icons.Filled.Audiotrack,
+                            contentDescription = "Audio Track",
+                            tint = Color.White
+                        )
+                    }
+                    IconButton(onClick = onSleepTimer) {
+                        Box {
+                            Icon(
+                                imageVector = Icons.Filled.Timer,
+                                contentDescription = "Sleep Timer",
+                                tint = if (sleepTimerMinutes > 0) MaterialTheme.colorScheme.primary else Color.White
+                            )
+                            if (sleepTimerMinutes > 0) {
+                                Text(
+                                    text = "$sleepTimerMinutes",
+                                    color = MaterialTheme.colorScheme.primary,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    modifier = Modifier
+                                        .align(Alignment.BottomEnd)
+                                        .background(Color.Black.copy(alpha = 0.5f), MaterialTheme.shapes.small)
+                                        .padding(horizontal = 2.dp)
+                                )
+                            }
+                        }
+                    }
+                    IconButton(onClick = onSpeed) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Icon(
+                                imageVector = Icons.Filled.Speed,
+                                contentDescription = "Playback Speed",
+                                tint = Color.White
+                            )
+                            Text(
+                                text = "${currentSpeed}x",
+                                color = Color.White,
+                                style = MaterialTheme.typography.labelSmall
+                            )
+                        }
+                    }
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                        IconButton(onClick = onPip) {
+                            Icon(
+                                imageVector = Icons.Filled.PictureInPictureAlt,
+                                contentDescription = "Picture in Picture",
+                                tint = Color.White
+                            )
+                        }
+                    }
                 }
             }
         }
@@ -526,23 +627,23 @@ enum class DragType { NONE, HORIZONTAL_SEEK, VERTICAL_BRIGHTNESS, VERTICAL_VOLUM
 fun GestureOverlay(exoPlayer: ExoPlayer, onTap: () -> Unit) {
     val context = LocalContext.current
     val audioManager = remember { context.getSystemService(Context.AUDIO_SERVICE) as AudioManager }
-    val maxVolume = remember { audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC) }
+    val maxVolume = remember { audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC).coerceAtLeast(1) }
 
-    var volumeLevel by remember { mutableStateOf(audioManager.getStreamVolume(AudioManager.STREAM_MUSIC).toFloat()) }
+    var volumeLevel by remember { mutableFloatStateOf(audioManager.getStreamVolume(AudioManager.STREAM_MUSIC).toFloat()) }
     
     val activity = context as? ComponentActivity
     var brightnessLevel by remember { 
-        mutableStateOf(
+        mutableFloatStateOf(
             activity?.window?.attributes?.screenBrightness.let { if (it == null || it < 0) 0.5f else it }
         ) 
     }
 
     var showOverlay by remember { mutableStateOf(false) }
-    var overlayIcon by remember { mutableStateOf("") }
-    var overlayText by remember { mutableStateOf("") }
-    
     var dragType by remember { mutableStateOf(DragType.NONE) }
-    var seekPositionMs by remember { mutableStateOf(0L) }
+    var startPositionMs by remember { mutableLongStateOf(0L) }
+    var seekPositionMs by remember { mutableLongStateOf(0L) }
+    var totalDragX by remember { mutableFloatStateOf(0f) }
+    var overlaySeekDelta by remember { mutableStateOf("") }
 
     // Double tap ripple animation state
     var doubleTapLeft by remember { mutableStateOf(false) }
@@ -550,7 +651,8 @@ fun GestureOverlay(exoPlayer: ExoPlayer, onTap: () -> Unit) {
     
     val rippleAlpha by animateFloatAsState(
         targetValue = if (doubleTapLeft || doubleTapRight) 0.3f else 0f,
-        animationSpec = tween(durationMillis = 300, easing = LinearOutSlowInEasing)
+        animationSpec = tween(durationMillis = 300, easing = LinearOutSlowInEasing),
+        label = "rippleAlpha"
     )
 
     LaunchedEffect(doubleTapLeft, doubleTapRight) {
@@ -561,8 +663,8 @@ fun GestureOverlay(exoPlayer: ExoPlayer, onTap: () -> Unit) {
         }
     }
 
-    LaunchedEffect(showOverlay) {
-        if (showOverlay) {
+    LaunchedEffect(showOverlay, dragType) {
+        if (showOverlay && dragType == DragType.NONE) {
             delay(1000)
             showOverlay = false
         }
@@ -592,13 +694,15 @@ fun GestureOverlay(exoPlayer: ExoPlayer, onTap: () -> Unit) {
                 detectDragGestures(
                     onDragStart = { _ ->
                         dragType = DragType.NONE
+                        totalDragX = 0f
+                        startPositionMs = exoPlayer.currentPosition
+                        seekPositionMs = exoPlayer.currentPosition
                     },
                     onDragEnd = {
                         if (dragType == DragType.HORIZONTAL_SEEK) {
                             exoPlayer.seekTo(seekPositionMs)
                         }
                         dragType = DragType.NONE
-                        showOverlay = false
                     },
                     onDragCancel = {
                         dragType = DragType.NONE
@@ -607,10 +711,12 @@ fun GestureOverlay(exoPlayer: ExoPlayer, onTap: () -> Unit) {
                 ) { change, dragAmount ->
                     change.consume()
                     if (dragType == DragType.NONE) {
-                        if (abs(dragAmount.x) > abs(dragAmount.y)) {
+                        if (kotlin.math.abs(dragAmount.x) > kotlin.math.abs(dragAmount.y) && kotlin.math.abs(dragAmount.x) > 5f) {
                             dragType = DragType.HORIZONTAL_SEEK
-                            seekPositionMs = exoPlayer.currentPosition
-                        } else {
+                            startPositionMs = exoPlayer.currentPosition
+                            seekPositionMs = startPositionMs
+                            totalDragX = 0f
+                        } else if (kotlin.math.abs(dragAmount.y) > 5f) {
                             if (change.position.x < size.width / 2) {
                                 dragType = DragType.VERTICAL_BRIGHTNESS
                             } else {
@@ -621,34 +727,33 @@ fun GestureOverlay(exoPlayer: ExoPlayer, onTap: () -> Unit) {
 
                     when (dragType) {
                         DragType.HORIZONTAL_SEEK -> {
-                            val seekChange = (dragAmount.x * 200).toLong() // scale factor
+                            totalDragX += dragAmount.x
+                            // Fine, smooth sensitivity: 35ms per pixel (100px = 3.5s)
+                            val seekDeltaMs = (totalDragX * 35f).toLong()
                             val duration = exoPlayer.duration.coerceAtLeast(0)
-                            seekPositionMs = (seekPositionMs + seekChange).coerceIn(0, duration)
-                            overlayIcon = "Seek"
-                            val sec = seekPositionMs / 1000
-                            overlayText = String.format("%02d:%02d", sec / 60, sec % 60)
+                            seekPositionMs = (startPositionMs + seekDeltaMs).coerceIn(0, duration)
+                            
+                            val deltaSec = (seekPositionMs - startPositionMs) / 1000
+                            val sign = if (deltaSec >= 0) "+" else ""
+                            overlaySeekDelta = "[$sign${deltaSec}s]"
                             showOverlay = true
                         }
                         DragType.VERTICAL_BRIGHTNESS -> {
-                            val diff = dragAmount.y / 500f
+                            val diff = dragAmount.y / 600f
                             brightnessLevel = (brightnessLevel - diff).coerceIn(0.01f, 1f)
                             activity?.window?.attributes = activity?.window?.attributes?.apply {
                                 screenBrightness = brightnessLevel
                             }
-                            overlayIcon = "Brightness"
-                            overlayText = "${(brightnessLevel * 100).toInt()}%"
                             showOverlay = true
                         }
                         DragType.VERTICAL_VOLUME -> {
-                            val diff = dragAmount.y / 200f
+                            val diff = (dragAmount.y / 400f) * maxVolume
                             volumeLevel = (volumeLevel - diff).coerceIn(0f, maxVolume.toFloat())
                             audioManager.setStreamVolume(
                                 AudioManager.STREAM_MUSIC,
                                 volumeLevel.toInt(),
                                 0
                             )
-                            overlayIcon = "Volume"
-                            overlayText = "${(volumeLevel / maxVolume * 100).toInt()}%"
                             showOverlay = true
                         }
                         else -> {}
@@ -697,16 +802,94 @@ fun GestureOverlay(exoPlayer: ExoPlayer, onTap: () -> Unit) {
             contentAlignment = Alignment.Center
         ) {
             Surface(
-                color = Color.Black.copy(alpha = 0.6f),
-                shape = MaterialTheme.shapes.medium
+                color = Color.Black.copy(alpha = 0.75f),
+                shape = RoundedCornerShape(16.dp),
+                border = BorderStroke(1.dp, Color.White.copy(alpha = 0.15f))
             ) {
                 Column(
-                    modifier = Modifier.padding(24.dp),
+                    modifier = Modifier.padding(horizontal = 24.dp, vertical = 18.dp),
                     horizontalAlignment = Alignment.CenterHorizontally
                 ) {
-                    Text(text = overlayIcon, color = Color.White, style = MaterialTheme.typography.titleMedium)
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Text(text = overlayText, color = Color.White, style = MaterialTheme.typography.titleLarge)
+                    when (dragType) {
+                        DragType.HORIZONTAL_SEEK -> {
+                            val isForward = seekPositionMs >= startPositionMs
+                            Icon(
+                                imageVector = if (isForward) Icons.Filled.FastForward else Icons.Filled.FastRewind,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(36.dp)
+                            )
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text(
+                                    text = formatTime(seekPositionMs),
+                                    color = MaterialTheme.colorScheme.primary,
+                                    style = MaterialTheme.typography.titleLarge,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                Text(
+                                    text = " / ${formatTime(exoPlayer.duration.coerceAtLeast(0))}",
+                                    color = Color.White.copy(alpha = 0.7f),
+                                    style = MaterialTheme.typography.titleMedium
+                                )
+                            }
+                            if (overlaySeekDelta.isNotBlank()) {
+                                Spacer(modifier = Modifier.height(4.dp))
+                                Text(
+                                    text = overlaySeekDelta,
+                                    color = Color.White.copy(alpha = 0.85f),
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                            }
+                        }
+                        DragType.VERTICAL_BRIGHTNESS -> {
+                            Icon(
+                                imageVector = Icons.Filled.BrightnessHigh,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(36.dp)
+                            )
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Text(
+                                text = "${(brightnessLevel * 100).toInt()}%",
+                                color = Color.White,
+                                style = MaterialTheme.typography.titleLarge,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Spacer(modifier = Modifier.height(8.dp))
+                            LinearProgressIndicator(
+                                progress = { brightnessLevel },
+                                modifier = Modifier.width(100.dp).height(4.dp).clip(RoundedCornerShape(2.dp)),
+                                color = MaterialTheme.colorScheme.primary,
+                                trackColor = Color.White.copy(alpha = 0.2f)
+                            )
+                        }
+                        DragType.VERTICAL_VOLUME -> {
+                            val volPct = (volumeLevel / maxVolume).coerceIn(0f, 1f)
+                            Icon(
+                                imageVector = if (volPct > 0f) Icons.Filled.VolumeUp else Icons.Filled.VolumeOff,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(36.dp)
+                            )
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Text(
+                                text = "${(volPct * 100).toInt()}%",
+                                color = Color.White,
+                                style = MaterialTheme.typography.titleLarge,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Spacer(modifier = Modifier.height(8.dp))
+                            LinearProgressIndicator(
+                                progress = { volPct },
+                                modifier = Modifier.width(100.dp).height(4.dp).clip(RoundedCornerShape(2.dp)),
+                                color = MaterialTheme.colorScheme.primary,
+                                trackColor = Color.White.copy(alpha = 0.2f)
+                            )
+                        }
+                        else -> {}
+                    }
                 }
             }
         }

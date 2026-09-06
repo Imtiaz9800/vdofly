@@ -1,39 +1,58 @@
 package com.example
 
 import android.Manifest
+import android.net.Uri
 import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.*
+import androidx.compose.animation.core.*
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.automirrored.filled.Sort
-import androidx.compose.material.icons.filled.Clear
-import androidx.compose.material.icons.filled.FolderOff
-import androidx.compose.material.icons.filled.MoreVert
-import androidx.compose.material.icons.filled.Movie
-import androidx.compose.material.icons.filled.Search
-import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.rotate
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil.ImageLoader
 import coil.compose.AsyncImage
 import coil.decode.VideoFrameDecoder
+import coil.request.ImageRequest
+import coil.request.videoFrameMillis
+import com.example.ui.theme.*
+
+enum class BottomNavTab {
+    LOCAL, RECENT, NETWORK, ME
+}
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -41,13 +60,33 @@ fun VideoScreen(
     viewModel: VideoViewModel,
     onVideoSelected: (Int) -> Unit
 ) {
+    val context = LocalContext.current
     val permissionGranted by viewModel.permissionGranted.collectAsStateWithLifecycle()
     val videos by viewModel.videos.collectAsStateWithLifecycle()
     val filteredVideos by viewModel.filteredVideos.collectAsStateWithLifecycle()
+    val continueWatching by viewModel.continueWatchingVideos.collectAsStateWithLifecycle()
+    val folders by viewModel.folders.collectAsStateWithLifecycle()
     val searchQuery by viewModel.searchQuery.collectAsStateWithLifecycle()
     val sortOrder by viewModel.sortOrder.collectAsStateWithLifecycle()
+    val selectedFilter by viewModel.selectedFilter.collectAsStateWithLifecycle()
+    val selectedFolder by viewModel.selectedFolder.collectAsStateWithLifecycle()
+    val isScanning by viewModel.isScanning.collectAsStateWithLifecycle()
+    val storageStats by viewModel.storageStats.collectAsStateWithLifecycle()
+    val toastMessage by viewModel.toastMessage.collectAsStateWithLifecycle()
+    val decoderMode by viewModel.decoderMode.collectAsStateWithLifecycle()
+    val recentStreams by viewModel.recentStreams.collectAsStateWithLifecycle()
 
+    var currentTab by remember { mutableStateOf(BottomNavTab.LOCAL) }
+    var showSearchField by remember { mutableStateOf(false) }
     var showSortMenu by remember { mutableStateOf(false) }
+    var isGridView by remember { mutableStateOf(false) }
+    var showStreamDialog by remember { mutableStateOf(false) }
+    var showPrivateVaultDialog by remember { mutableStateOf(false) }
+    var showCastDialog by remember { mutableStateOf(false) }
+    var streamUrlInput by remember { mutableStateOf("") }
+    var pinInput by remember { mutableStateOf("") }
+    var videoToDelete by remember { mutableStateOf<VideoItem?>(null) }
+    var videoDetailsToShow by remember { mutableStateOf<VideoItem?>(null) }
 
     val permissionToRequest = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
         Manifest.permission.READ_MEDIA_VIDEO
@@ -67,206 +106,1758 @@ fun VideoScreen(
         launcher.launch(permissionToRequest)
     }
 
+    val imageLoader = remember {
+        ImageLoader.Builder(context)
+            .components {
+                add(VideoFrameDecoder.Factory())
+            }
+            .build()
+    }
+
+    // Infinite rotation for scan icon
+    val infiniteTransition = rememberInfiniteTransition(label = "scan_spin")
+    val spinAngle by infiniteTransition.animateFloat(
+        initialValue = 0f,
+        targetValue = 360f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(1000, easing = LinearEasing),
+            repeatMode = RepeatMode.Restart
+        ),
+        label = "spin_angle"
+    )
+
     Scaffold(
+        containerColor = MaterialTheme.colorScheme.background,
         topBar = {
             TopAppBar(
-                title = { 
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Icon(
-                            imageVector = Icons.Default.Movie, 
-                            contentDescription = null, 
-                            tint = MaterialTheme.colorScheme.primary,
-                            modifier = Modifier.size(28.dp)
+                title = {
+                    if (showSearchField) {
+                        TextField(
+                            value = searchQuery,
+                            onValueChange = { viewModel.updateSearchQuery(it) },
+                            placeholder = { Text("Search videos...", color = OnSurfaceVariantDark) },
+                            singleLine = true,
+                            colors = TextFieldDefaults.colors(
+                                focusedContainerColor = Color.Transparent,
+                                unfocusedContainerColor = Color.Transparent,
+                                focusedTextColor = OnSurfaceDark,
+                                unfocusedTextColor = OnSurfaceDark,
+                                focusedIndicatorColor = PrimaryCyan,
+                                unfocusedIndicatorColor = Color.Transparent
+                            ),
+                            trailingIcon = {
+                                IconButton(onClick = {
+                                    if (searchQuery.isNotEmpty()) viewModel.updateSearchQuery("")
+                                    else showSearchField = false
+                                }) {
+                                    Icon(Icons.Default.Clear, contentDescription = "Clear", tint = OnSurfaceVariantDark)
+                                }
+                            },
+                            modifier = Modifier.fillMaxWidth()
                         )
-                        Spacer(Modifier.width(12.dp))
-                        Text(
-                            text = "VDOFLY", 
-                            fontWeight = FontWeight.Bold,
-                            style = MaterialTheme.typography.titleLarge
-                        )
+                    } else {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Box(
+                                modifier = Modifier
+                                    .size(32.dp)
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(PrimaryContainerCyan),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    Icons.Default.PlayArrow,
+                                    contentDescription = "VDOFLY Logo",
+                                    tint = OnPrimaryCyan,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                            }
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                "VDOFLY",
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 18.sp,
+                                color = OnSurfaceDark
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                "Local",
+                                fontSize = 12.sp,
+                                color = OnSurfaceVariantDark,
+                                fontWeight = FontWeight.Medium
+                            )
+                        }
                     }
                 },
                 actions = {
-                    Box {
-                        IconButton(onClick = { showSortMenu = true }) {
-                            Icon(Icons.AutoMirrored.Filled.Sort, contentDescription = "Sort", tint = MaterialTheme.colorScheme.onBackground)
+                    if (!showSearchField) {
+                        IconButton(onClick = { showSearchField = true }) {
+                            Icon(Icons.Default.Search, contentDescription = "Search", tint = OnSurfaceVariantDark)
                         }
-                        DropdownMenu(
-                            expanded = showSortMenu,
-                            onDismissRequest = { showSortMenu = false }
-                        ) {
-                            DropdownMenuItem(
-                                text = { Text("Date Added") },
-                                onClick = { viewModel.setSortOrder(SortOrder.DATE_ADDED); showSortMenu = false },
-                                leadingIcon = { if (sortOrder == SortOrder.DATE_ADDED) Icon(Icons.Default.MoreVert, null) }
-                            )
-                            DropdownMenuItem(
-                                text = { Text("Duration") },
-                                onClick = { viewModel.setSortOrder(SortOrder.DURATION); showSortMenu = false },
-                                leadingIcon = { if (sortOrder == SortOrder.DURATION) Icon(Icons.Default.MoreVert, null) }
-                            )
-                            DropdownMenuItem(
-                                text = { Text("Size") },
-                                onClick = { viewModel.setSortOrder(SortOrder.SIZE); showSortMenu = false },
-                                leadingIcon = { if (sortOrder == SortOrder.SIZE) Icon(Icons.Default.MoreVert, null) }
-                            )
-                            DropdownMenuItem(
-                                text = { Text("Name") },
-                                onClick = { viewModel.setSortOrder(SortOrder.NAME); showSortMenu = false },
-                                leadingIcon = { if (sortOrder == SortOrder.NAME) Icon(Icons.Default.MoreVert, null) }
-                            )
+                        IconButton(onClick = { showPrivateVaultDialog = true }) {
+                            Icon(Icons.Default.Lock, contentDescription = "Private Folder", tint = OnSurfaceVariantDark)
+                        }
+                        IconButton(onClick = { showCastDialog = true }) {
+                            Icon(Icons.Default.Cast, contentDescription = "Cast", tint = OnSurfaceVariantDark)
+                        }
+                        Box {
+                            IconButton(onClick = { showSortMenu = true }) {
+                                Icon(Icons.Default.MoreVert, contentDescription = "More Options", tint = OnSurfaceVariantDark)
+                            }
+                            DropdownMenu(
+                                expanded = showSortMenu,
+                                onDismissRequest = { showSortMenu = false },
+                                modifier = Modifier.background(SurfaceContainerDark)
+                            ) {
+                                Text(
+                                    "SORT BY",
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = PrimaryCyan,
+                                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp)
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("Date Added", color = OnSurfaceDark) },
+                                    onClick = { viewModel.setSortOrder(SortOrder.DATE_ADDED); showSortMenu = false },
+                                    leadingIcon = { if (sortOrder == SortOrder.DATE_ADDED) Icon(Icons.Default.Check, null, tint = PrimaryCyan) }
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("Duration", color = OnSurfaceDark) },
+                                    onClick = { viewModel.setSortOrder(SortOrder.DURATION); showSortMenu = false },
+                                    leadingIcon = { if (sortOrder == SortOrder.DURATION) Icon(Icons.Default.Check, null, tint = PrimaryCyan) }
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("Size", color = OnSurfaceDark) },
+                                    onClick = { viewModel.setSortOrder(SortOrder.SIZE); showSortMenu = false },
+                                    leadingIcon = { if (sortOrder == SortOrder.SIZE) Icon(Icons.Default.Check, null, tint = PrimaryCyan) }
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("Name", color = OnSurfaceDark) },
+                                    onClick = { viewModel.setSortOrder(SortOrder.NAME); showSortMenu = false },
+                                    leadingIcon = { if (sortOrder == SortOrder.NAME) Icon(Icons.Default.Check, null, tint = PrimaryCyan) }
+                                )
+                                HorizontalDivider(color = OutlineVariantDark)
+                                DropdownMenuItem(
+                                    text = { Text("Rescan Library", color = OnSurfaceDark) },
+                                    onClick = { viewModel.refreshLibrary(); showSortMenu = false },
+                                    leadingIcon = { Icon(Icons.Default.Sync, null, tint = PrimaryCyan) }
+                                )
+                            }
                         }
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = Color.Transparent,
-                    titleContentColor = MaterialTheme.colorScheme.onBackground
+                    containerColor = SurfaceDark.copy(alpha = 0.95f),
+                    titleContentColor = OnSurfaceDark
                 )
             )
         },
-        containerColor = MaterialTheme.colorScheme.background
-    ) { paddingValues ->
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(paddingValues)
-        ) {
-            if (!permissionGranted) {
-                Column(
-                    modifier = Modifier.fillMaxSize().padding(32.dp),
-                    verticalArrangement = Arrangement.Center,
-                    horizontalAlignment = Alignment.CenterHorizontally
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.FolderOff,
-                        contentDescription = null,
-                        modifier = Modifier.size(72.dp),
-                        tint = MaterialTheme.colorScheme.primary
+        bottomBar = {
+            NavigationBar(
+                containerColor = SurfaceContainerDark.copy(alpha = 0.95f),
+                tonalElevation = 8.dp
+            ) {
+                NavigationBarItem(
+                    selected = currentTab == BottomNavTab.LOCAL,
+                    onClick = { currentTab = BottomNavTab.LOCAL },
+                    icon = { Icon(Icons.Default.Folder, contentDescription = "Local") },
+                    label = { Text("Local", fontSize = 11.sp, fontWeight = FontWeight.SemiBold) },
+                    colors = NavigationBarItemDefaults.colors(
+                        selectedIconColor = PrimaryCyan,
+                        selectedTextColor = PrimaryCyan,
+                        unselectedIconColor = OnSurfaceVariantDark,
+                        unselectedTextColor = OnSurfaceVariantDark,
+                        indicatorColor = PrimaryContainerCyan.copy(alpha = 0.2f)
                     )
-                    Spacer(modifier = Modifier.height(24.dp))
-                    Text(
-                        text = "Storage Permission Required",
-                        style = MaterialTheme.typography.titleLarge,
-                        color = MaterialTheme.colorScheme.onBackground
+                )
+                NavigationBarItem(
+                    selected = currentTab == BottomNavTab.RECENT,
+                    onClick = { currentTab = BottomNavTab.RECENT },
+                    icon = { Icon(Icons.Default.Schedule, contentDescription = "Recent") },
+                    label = { Text("Recent", fontSize = 11.sp, fontWeight = FontWeight.SemiBold) },
+                    colors = NavigationBarItemDefaults.colors(
+                        selectedIconColor = PrimaryCyan,
+                        selectedTextColor = PrimaryCyan,
+                        unselectedIconColor = OnSurfaceVariantDark,
+                        unselectedTextColor = OnSurfaceVariantDark,
+                        indicatorColor = PrimaryContainerCyan.copy(alpha = 0.2f)
                     )
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Text(
-                        text = "VDOFLY needs access to your local storage to find and play videos.",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                )
+                NavigationBarItem(
+                    selected = currentTab == BottomNavTab.NETWORK,
+                    onClick = { currentTab = BottomNavTab.NETWORK },
+                    icon = { Icon(Icons.Default.Language, contentDescription = "Network") },
+                    label = { Text("Network", fontSize = 11.sp, fontWeight = FontWeight.SemiBold) },
+                    colors = NavigationBarItemDefaults.colors(
+                        selectedIconColor = PrimaryCyan,
+                        selectedTextColor = PrimaryCyan,
+                        unselectedIconColor = OnSurfaceVariantDark,
+                        unselectedTextColor = OnSurfaceVariantDark,
+                        indicatorColor = PrimaryContainerCyan.copy(alpha = 0.2f)
                     )
-                    Spacer(modifier = Modifier.height(32.dp))
-                    Button(
-                        onClick = { launcher.launch(permissionToRequest) },
-                        modifier = Modifier.fillMaxWidth().height(50.dp)
+                )
+                NavigationBarItem(
+                    selected = currentTab == BottomNavTab.ME,
+                    onClick = { currentTab = BottomNavTab.ME },
+                    icon = { Icon(Icons.Default.Person, contentDescription = "Me") },
+                    label = { Text("Me", fontSize = 11.sp, fontWeight = FontWeight.SemiBold) },
+                    colors = NavigationBarItemDefaults.colors(
+                        selectedIconColor = PrimaryCyan,
+                        selectedTextColor = PrimaryCyan,
+                        unselectedIconColor = OnSurfaceVariantDark,
+                        unselectedTextColor = OnSurfaceVariantDark,
+                        indicatorColor = PrimaryContainerCyan.copy(alpha = 0.2f)
+                    )
+                )
+            }
+        },
+        floatingActionButton = {
+            if (currentTab == BottomNavTab.LOCAL) {
+                Column(horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Surface(
+                        onClick = { showStreamDialog = true },
+                        shape = CircleShape,
+                        color = SurfaceContainerHighDark,
+                        shadowElevation = 6.dp,
+                        modifier = Modifier.padding(bottom = 2.dp)
                     ) {
-                        Text("Grant Access")
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp)
+                        ) {
+                            Icon(Icons.Default.Link, contentDescription = null, tint = PrimaryCyan, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("Stream URL", color = OnSurfaceDark, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                        }
+                    }
+
+                    FloatingActionButton(
+                        onClick = {
+                            if (videos.isNotEmpty()) {
+                                val randomIndex = (0 until videos.size).random()
+                                onVideoSelected(randomIndex)
+                            }
+                        },
+                        containerColor = PrimaryCyan,
+                        contentColor = OnPrimaryCyan,
+                        shape = CircleShape,
+                        elevation = FloatingActionButtonDefaults.elevation(8.dp)
+                    ) {
+                        Icon(Icons.Default.Shuffle, contentDescription = "Shuffle Play", modifier = Modifier.size(26.dp))
                     }
                 }
-            } else if (videos.isEmpty()) {
-                Column(
-                    modifier = Modifier.fillMaxSize(),
-                    verticalArrangement = Arrangement.Center,
-                    horizontalAlignment = Alignment.CenterHorizontally
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Movie,
-                        contentDescription = null,
-                        modifier = Modifier.size(72.dp),
-                        tint = MaterialTheme.colorScheme.surfaceVariant
-                    )
-                    Spacer(modifier = Modifier.height(16.dp))
-                    Text(
-                        text = "No videos found",
-                        style = MaterialTheme.typography.titleMedium,
-                        color = MaterialTheme.colorScheme.onBackground
-                    )
-                    Text(
-                        text = "Download or copy some videos to this device.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+            }
+        }
+    ) { paddingValues ->
+        Box(modifier = Modifier.fillMaxSize().padding(paddingValues)) {
+            when (currentTab) {
+                BottomNavTab.LOCAL -> {
+                    LocalLibraryContent(
+                        viewModel = viewModel,
+                        videos = videos,
+                        filteredVideos = filteredVideos,
+                        continueWatching = continueWatching,
+                        folders = folders,
+                        selectedFilter = selectedFilter,
+                        selectedFolder = selectedFolder,
+                        isGridView = isGridView,
+                        imageLoader = imageLoader,
+                        onToggleGridView = { isGridView = !isGridView },
+                        onVideoSelected = { video ->
+                            val index = videos.indexOfFirst { it.id == video.id }
+                            if (index != -1) onVideoSelected(index)
+                        },
+                        onVideoLongClick = { video ->
+                            videoToDelete = video
+                        },
+                        onDeleteRequested = { video ->
+                            videoToDelete = video
+                        },
+                        onInfoRequested = { video ->
+                            videoDetailsToShow = video
+                        },
+                        onFolderSelected = { folderName ->
+                            viewModel.selectFolder(if (selectedFolder == folderName) null else folderName)
+                        },
+                        onNavigateToRecent = { currentTab = BottomNavTab.RECENT }
                     )
                 }
-            } else {
-                Column(modifier = Modifier.fillMaxSize()) {
+                BottomNavTab.RECENT -> {
+                    RecentWatchHistoryContent(
+                        continueWatching = continueWatching,
+                        videos = videos,
+                        imageLoader = imageLoader,
+                        onVideoSelected = { video ->
+                            val index = videos.indexOfFirst { it.id == video.id }
+                            if (index != -1) onVideoSelected(index)
+                        },
+                        onVideoLongClick = { video ->
+                            videoToDelete = video
+                        },
+                        onDeleteRequested = { video ->
+                            videoToDelete = video
+                        },
+                        onInfoRequested = { video ->
+                            videoDetailsToShow = video
+                        }
+                    )
+                }
+                BottomNavTab.NETWORK -> {
+                    NetworkStreamContent(
+                        recentStreams = recentStreams,
+                        onPlayStream = { url ->
+                            viewModel.addNetworkStream(url)
+                            viewModel.showToast("Streaming $url")
+                            val index = videos.indexOfFirst { it.uri.toString() == url }
+                            if (index != -1) onVideoSelected(index)
+                            else if (videos.isNotEmpty()) onVideoSelected(0)
+                        }
+                    )
+                }
+                BottomNavTab.ME -> {
+                    MeSettingsContent(
+                        decoderMode = decoderMode,
+                        storageStats = storageStats,
+                        totalVideosCount = videos.size,
+                        onSelectDecoder = { viewModel.setDecoderMode(it) },
+                        onRescan = { viewModel.refreshLibrary() }
+                    )
+                }
+            }
+
+            AnimatedVisibility(
+                visible = toastMessage != null,
+                enter = slideInVertically(initialOffsetY = { it }) + fadeIn(),
+                exit = slideOutVertically(targetOffsetY = { it }) + fadeOut(),
+                modifier = Modifier
+                    .align(Alignment.BottomStart)
+                    .padding(start = 16.dp, bottom = 16.dp)
+            ) {
+                Surface(
+                    shape = RoundedCornerShape(8.dp),
+                    color = SurfaceContainerHighestDark,
+                    shadowElevation = 8.dp
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)
+                    ) {
+                        Icon(Icons.Default.CheckCircle, contentDescription = null, tint = PrimaryCyan, modifier = Modifier.size(18.dp))
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(toastMessage ?: "", color = OnSurfaceDark, fontSize = 12.sp)
+                    }
+                }
+            }
+        }
+    }
+
+    if (showStreamDialog) {
+        AlertDialog(
+            onDismissRequest = { showStreamDialog = false },
+            containerColor = SurfaceContainerDark,
+            title = {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Default.Link, contentDescription = null, tint = PrimaryCyan)
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("Open Network Stream", color = OnSurfaceDark, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                }
+            },
+            text = {
+                Column(modifier = Modifier.fillMaxWidth()) {
+                    Text("Enter any HTTP, HTTPS, HLS, or RTSP video link:", color = OnSurfaceVariantDark, fontSize = 13.sp)
+                    Spacer(modifier = Modifier.height(10.dp))
                     OutlinedTextField(
-                        value = searchQuery,
-                        onValueChange = { viewModel.updateSearchQuery(it) },
+                        value = streamUrlInput,
+                        onValueChange = { streamUrlInput = it },
+                        placeholder = { Text("https://example.com/video.mp4", color = OutlineDark) },
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = PrimaryCyan,
+                            unfocusedBorderColor = OutlineVariantDark,
+                            focusedTextColor = OnSurfaceDark,
+                            unfocusedTextColor = OnSurfaceDark
+                        ),
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        if (streamUrlInput.isNotBlank()) {
+                            viewModel.addNetworkStream(streamUrlInput)
+                            showStreamDialog = false
+                            viewModel.showToast("Opening stream...")
+                            if (videos.isNotEmpty()) onVideoSelected(0)
+                        }
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = PrimaryCyan, contentColor = OnPrimaryCyan)
+                ) {
+                    Text("Play Stream")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showStreamDialog = false }) {
+                    Text("Cancel", color = OnSurfaceVariantDark)
+                }
+            }
+        )
+    }
+
+    if (showPrivateVaultDialog) {
+        AlertDialog(
+            onDismissRequest = { showPrivateVaultDialog = false },
+            containerColor = SurfaceContainerDark,
+            title = {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Default.Lock, contentDescription = null, tint = TertiaryAmber)
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("Private Safe Folder", color = OnSurfaceDark, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                }
+            },
+            text = {
+                Column(modifier = Modifier.fillMaxWidth()) {
+                    Text("Enter your 4-digit security PIN to access encrypted video files:", color = OnSurfaceVariantDark, fontSize = 13.sp)
+                    Spacer(modifier = Modifier.height(12.dp))
+                    OutlinedTextField(
+                        value = pinInput,
+                        onValueChange = { if (it.length <= 4) pinInput = it },
+                        placeholder = { Text("••••", color = OutlineDark) },
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = TertiaryAmber,
+                            unfocusedBorderColor = OutlineVariantDark,
+                            focusedTextColor = OnSurfaceDark,
+                            unfocusedTextColor = OnSurfaceDark
+                        ),
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        showPrivateVaultDialog = false
+                        viewModel.showToast("Private folder unlocked (0 hidden files)")
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = TertiaryAmber, contentColor = OnTertiaryAmber)
+                ) {
+                    Text("Unlock")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showPrivateVaultDialog = false }) {
+                    Text("Cancel", color = OnSurfaceVariantDark)
+                }
+            }
+        )
+    }
+
+    if (showCastDialog) {
+        AlertDialog(
+            onDismissRequest = { showCastDialog = false },
+            containerColor = SurfaceContainerDark,
+            title = {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Default.Cast, contentDescription = null, tint = PrimaryCyan)
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("Connect to Cast Device", color = OnSurfaceDark, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                }
+            },
+            text = {
+                Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.fillMaxWidth().padding(vertical = 12.dp)) {
+                    CircularProgressIndicator(color = PrimaryCyan, modifier = Modifier.size(36.dp))
+                    Spacer(modifier = Modifier.height(14.dp))
+                    Text("Searching for Chromecast and Smart TVs on Wi-Fi...", color = OnSurfaceVariantDark, fontSize = 13.sp)
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showCastDialog = false }) {
+                    Text("Close", color = PrimaryCyan)
+                }
+            }
+        )
+    }
+
+    if (videoToDelete != null) {
+        DeleteVideoDialog(
+            video = videoToDelete!!,
+            imageLoader = imageLoader,
+            onDismiss = { videoToDelete = null },
+            onConfirm = {
+                val toDelete = videoToDelete
+                if (toDelete != null) {
+                    viewModel.deleteVideo(toDelete.uri)
+                }
+                videoToDelete = null
+            }
+        )
+    }
+
+    if (videoDetailsToShow != null) {
+        VideoDetailsDialog(
+            video = videoDetailsToShow!!,
+            onDismiss = { videoDetailsToShow = null }
+        )
+    }
+}
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+fun LocalLibraryContent(
+    viewModel: VideoViewModel,
+    videos: List<VideoItem>,
+    filteredVideos: List<VideoItem>,
+    continueWatching: List<VideoItem>,
+    folders: List<VideoFolder>,
+    selectedFilter: FilterCategory,
+    selectedFolder: String?,
+    isGridView: Boolean,
+    imageLoader: ImageLoader,
+    onToggleGridView: () -> Unit,
+    onVideoSelected: (VideoItem) -> Unit,
+    onVideoLongClick: (VideoItem) -> Unit,
+    onDeleteRequested: (VideoItem) -> Unit,
+    onInfoRequested: (VideoItem) -> Unit,
+    onFolderSelected: (String) -> Unit,
+    onNavigateToRecent: () -> Unit
+) {
+    LazyColumn(
+        modifier = Modifier.fillMaxSize(),
+        contentPadding = PaddingValues(bottom = 80.dp),
+        verticalArrangement = Arrangement.spacedBy(16.dp)
+    ) {
+        item {
+            LazyRow(
+                contentPadding = PaddingValues(horizontal = 16.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                item {
+                    FilterChipItem(
+                        icon = Icons.Default.FolderOpen,
+                        label = "All Folders",
+                        isSelected = selectedFilter == FilterCategory.ALL_FOLDERS,
+                        onClick = { viewModel.setFilterCategory(FilterCategory.ALL_FOLDERS) }
+                    )
+                }
+                item {
+                    FilterChipItem(
+                        icon = Icons.Default.PlayCircle,
+                        label = "Videos",
+                        countBadge = videos.size.toString(),
+                        isSelected = selectedFilter == FilterCategory.VIDEOS,
+                        onClick = { viewModel.setFilterCategory(FilterCategory.VIDEOS) }
+                    )
+                }
+                item {
+                    FilterChipItem(
+                        icon = Icons.Default.Done,
+                        label = "Downloaded",
+                        isSelected = selectedFilter == FilterCategory.DOWNLOADED,
+                        onClick = { viewModel.setFilterCategory(FilterCategory.DOWNLOADED) }
+                    )
+                }
+                item {
+                    FilterChipItem(
+                        icon = Icons.Default.Chat,
+                        label = "WhatsApp Status",
+                        isSelected = selectedFilter == FilterCategory.WHATSAPP,
+                        onClick = { viewModel.setFilterCategory(FilterCategory.WHATSAPP) }
+                    )
+                }
+                item {
+                    FilterChipItem(
+                        icon = Icons.Default.Videocam,
+                        label = "Camera",
+                        isSelected = selectedFilter == FilterCategory.CAMERA,
+                        onClick = { viewModel.setFilterCategory(FilterCategory.CAMERA) }
+                    )
+                }
+                item {
+                    FilterChipItem(
+                        icon = Icons.Default.Lock,
+                        label = "Hidden Folder",
+                        isSelected = selectedFilter == FilterCategory.HIDDEN,
+                        onClick = { viewModel.showToast("Safe Folder is locked") }
+                    )
+                }
+            }
+        }
+
+        if (continueWatching.isNotEmpty() && selectedFolder == null && selectedFilter == FilterCategory.ALL_FOLDERS) {
+            item {
+                Column(modifier = Modifier.fillMaxWidth()) {
+                    Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(horizontal = 16.dp, vertical = 8.dp),
-                        placeholder = { Text("Search videos...") },
-                        leadingIcon = {
-                            Icon(Icons.Default.Search, contentDescription = "Search")
-                        },
-                        trailingIcon = {
-                            if (searchQuery.isNotEmpty()) {
-                                IconButton(onClick = { viewModel.updateSearchQuery("") }) {
-                                    Icon(Icons.Default.Clear, contentDescription = "Clear search")
-                                }
-                            }
-                        },
-                        singleLine = true,
-                        shape = RoundedCornerShape(12.dp)
-                    )
-                    
-                    if (filteredVideos.isEmpty()) {
-                        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                            .padding(horizontal = 16.dp, vertical = 4.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Box(
+                                modifier = Modifier
+                                    .size(8.dp)
+                                    .clip(CircleShape)
+                                    .background(PrimaryCyan)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
                             Text(
-                                text = "No videos match your search",
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                "Continue Watching",
+                                color = OnSurfaceDark,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 16.sp
                             )
                         }
-                    } else {
-                        LazyColumn(
-                            modifier = Modifier.fillMaxSize(),
-                            contentPadding = PaddingValues(16.dp),
-                            verticalArrangement = Arrangement.spacedBy(8.dp)
+
+                        TextButton(
+                            onClick = onNavigateToRecent,
+                            contentPadding = PaddingValues(0.dp)
                         ) {
-                            itemsIndexed(filteredVideos, key = { _, it -> it.id }) { index, video ->
-                                val dismissState = rememberSwipeToDismissBoxState(
-                                    confirmValueChange = {
-                                        if (it == SwipeToDismissBoxValue.EndToStart) {
-                                            viewModel.deleteVideo(video.uri)
-                                            true
-                                        } else {
-                                            false
-                                        }
-                                    }
-                                )
-                                SwipeToDismissBox(
-                                    state = dismissState,
-                                    enableDismissFromStartToEnd = false,
-                                    backgroundContent = {
-                                        val color = when (dismissState.targetValue) {
-                                            SwipeToDismissBoxValue.EndToStart -> MaterialTheme.colorScheme.errorContainer
-                                            else -> Color.Transparent
-                                        }
-                                        Box(
-                                            modifier = Modifier
-                                                .fillMaxSize()
-                                                .background(color, RoundedCornerShape(12.dp))
-                                                .padding(horizontal = 20.dp),
-                                            contentAlignment = Alignment.CenterEnd
-                                        ) {
-                                            Icon(
-                                                Icons.Default.Delete,
-                                                contentDescription = "Delete",
-                                                tint = MaterialTheme.colorScheme.onErrorContainer
-                                            )
-                                        }
-                                    },
-                                    content = {
-                                        VideoItemCard(
-                                            video = video,
-                                            onClick = { onVideoSelected(index) }
-                                        )
-                                    }
+                            Text("History", color = PrimaryCyan, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                            Icon(Icons.AutoMirrored.Filled.ArrowForward, contentDescription = null, tint = PrimaryCyan, modifier = Modifier.size(14.dp))
+                        }
+                    }
+
+                    LazyRow(
+                        contentPadding = PaddingValues(horizontal = 16.dp),
+                        horizontalArrangement = Arrangement.spacedBy(14.dp)
+                    ) {
+                        items(continueWatching, key = { it.id }) { video ->
+                            ContinueWatchingCard(
+                                video = video,
+                                imageLoader = imageLoader,
+                                onClick = { onVideoSelected(video) },
+                                onLongClick = { onVideoLongClick(video) },
+                                onDeleteClick = { onDeleteRequested(video) },
+                                onInfoClick = { onInfoRequested(video) }
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        item {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 2.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    if (selectedFolder != null) {
+                        IconButton(onClick = { viewModel.selectFolder(null) }, modifier = Modifier.size(24.dp)) {
+                            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", tint = PrimaryCyan)
+                        }
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(selectedFolder, color = OnSurfaceDark, fontWeight = FontWeight.Bold, fontSize = 17.sp)
+                    } else {
+                        Text(
+                            if (selectedFilter == FilterCategory.ALL_FOLDERS) "Folders" else "Videos",
+                            color = OnSurfaceDark,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 17.sp
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Surface(
+                            shape = CircleShape,
+                            color = SurfaceContainerHighDark
+                        ) {
+                            Text(
+                                if (selectedFilter == FilterCategory.ALL_FOLDERS) "${folders.size}" else "${filteredVideos.size}",
+                                color = OnSurfaceVariantDark,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
+                            )
+                        }
+                    }
+                }
+
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    IconButton(onClick = onToggleGridView, modifier = Modifier.size(32.dp)) {
+                        Icon(
+                            if (isGridView) Icons.Default.ViewAgenda else Icons.Default.GridView,
+                            contentDescription = "Toggle Grid",
+                            tint = OnSurfaceVariantDark,
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
+                }
+            }
+        }
+
+        if (selectedFolder == null && selectedFilter == FilterCategory.ALL_FOLDERS) {
+            items(folders, key = { it.name }) { folder ->
+                FolderListItem(
+                    folder = folder,
+                    imageLoader = imageLoader,
+                    onClick = { onFolderSelected(folder.name) }
+                )
+            }
+        } else {
+            if (filteredVideos.isEmpty()) {
+                item {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(40.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Icon(Icons.Default.FolderOff, contentDescription = null, tint = OutlineDark, modifier = Modifier.size(48.dp))
+                            Spacer(modifier = Modifier.height(12.dp))
+                            Text("No videos found", color = OnSurfaceVariantDark, fontSize = 14.sp)
+                        }
+                    }
+                }
+            } else if (isGridView) {
+                val chunkedVideos = filteredVideos.chunked(2)
+                items(chunkedVideos, key = { chunk -> chunk.joinToString { it.id.toString() } }) { rowVideos ->
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp),
+                        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        for (video in rowVideos) {
+                            Box(modifier = Modifier.weight(1f)) {
+                                VideoGridCard(
+                                    video = video,
+                                    imageLoader = imageLoader,
+                                    onClick = { onVideoSelected(video) },
+                                    onLongClick = { onVideoLongClick(video) },
+                                    onDeleteClick = { onDeleteRequested(video) },
+                                    onInfoClick = { onInfoRequested(video) }
                                 )
                             }
                         }
+                        if (rowVideos.size == 1) {
+                            Spacer(modifier = Modifier.weight(1f))
+                        }
+                    }
+                }
+            } else {
+                items(filteredVideos, key = { it.id }) { video ->
+                    val dismissState = rememberSwipeToDismissBoxState(
+                        confirmValueChange = {
+                            if (it == SwipeToDismissBoxValue.EndToStart) {
+                                onDeleteRequested(video)
+                                false
+                            } else false
+                        }
+                    )
+
+                    SwipeToDismissBox(
+                        state = dismissState,
+                        enableDismissFromStartToEnd = false,
+                        backgroundContent = {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .padding(horizontal = 16.dp)
+                                    .background(ErrorContainerDark, RoundedCornerShape(12.dp))
+                                    .padding(horizontal = 20.dp),
+                                contentAlignment = Alignment.CenterEnd
+                            ) {
+                                Icon(Icons.Default.Delete, contentDescription = "Delete", tint = OnErrorContainerDark)
+                            }
+                        },
+                        content = {
+                            Box(modifier = Modifier.padding(horizontal = 16.dp)) {
+                                VideoListItemCard(
+                                    video = video,
+                                    imageLoader = imageLoader,
+                                    onClick = { onVideoSelected(video) },
+                                    onLongClick = { onVideoLongClick(video) },
+                                    onDeleteClick = { onDeleteRequested(video) },
+                                    onInfoClick = { onInfoRequested(video) }
+                                )
+                            }
+                        }
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun FilterChipItem(
+    icon: ImageVector,
+    label: String,
+    countBadge: String? = null,
+    isSelected: Boolean,
+    onClick: () -> Unit
+) {
+    Surface(
+        onClick = onClick,
+        shape = CircleShape,
+        color = if (isSelected) PrimaryContainerCyan else SurfaceContainerHighDark,
+        contentColor = if (isSelected) OnPrimaryCyan else OnSurfaceDark,
+        shadowElevation = if (isSelected) 3.dp else 0.dp
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp)
+        ) {
+            Icon(
+                icon,
+                contentDescription = null,
+                tint = if (isSelected) OnPrimaryCyan else PrimaryCyan,
+                modifier = Modifier.size(16.dp)
+            )
+            Spacer(modifier = Modifier.width(6.dp))
+            Text(label, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+            if (countBadge != null) {
+                Spacer(modifier = Modifier.width(6.dp))
+                Surface(
+                    shape = CircleShape,
+                    color = if (isSelected) OnPrimaryCyan.copy(alpha = 0.2f) else SurfaceContainerHighestDark
+                ) {
+                    Text(
+                        countBadge,
+                        color = if (isSelected) OnPrimaryCyan else PrimaryCyan,
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 1.dp)
+                    )
+                }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+fun ContinueWatchingCard(
+    video: VideoItem,
+    imageLoader: ImageLoader,
+    onClick: () -> Unit,
+    onLongClick: () -> Unit = {},
+    onDeleteClick: () -> Unit = {},
+    onInfoClick: () -> Unit = {}
+) {
+    val haptic = LocalHapticFeedback.current
+    var showMenu by remember { mutableStateOf(false) }
+
+    Card(
+        shape = RoundedCornerShape(12.dp),
+        colors = CardDefaults.cardColors(containerColor = SurfaceContainerDark),
+        modifier = Modifier
+            .width(260.dp)
+            .combinedClickable(
+                onClick = onClick,
+                onLongClick = {
+                    haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                    onLongClick()
+                }
+            )
+    ) {
+        Column {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .aspectRatio(16f / 9f)
+                    .background(SurfaceContainerHighestDark)
+            ) {
+                AsyncImage(
+                    model = ImageRequest.Builder(LocalContext.current)
+                        .data(video.uri)
+                        .videoFrameMillis(1000)
+                        .crossfade(true)
+                        .build(),
+                    imageLoader = imageLoader,
+                    contentDescription = null,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize()
+                )
+
+                Row(
+                    modifier = Modifier
+                        .align(Alignment.TopStart)
+                        .padding(8.dp),
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Surface(
+                        shape = RoundedCornerShape(4.dp),
+                        color = SurfaceContainerLowestDark.copy(alpha = 0.85f)
+                    ) {
+                        Text(
+                            "HW+",
+                            color = PrimaryCyan,
+                            fontSize = 9.sp,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp)
+                        )
+                    }
+                    Surface(
+                        shape = RoundedCornerShape(4.dp),
+                        color = SurfaceContainerLowestDark.copy(alpha = 0.85f)
+                    ) {
+                        Text(
+                            video.resolution,
+                            color = TertiaryAmber,
+                            fontSize = 9.sp,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp)
+                        )
+                    }
+                }
+
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.Center)
+                        .size(40.dp)
+                        .clip(CircleShape)
+                        .background(PrimaryCyan.copy(alpha = 0.95f)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(Icons.Default.PlayArrow, contentDescription = "Play", tint = OnPrimaryCyan, modifier = Modifier.size(24.dp))
+                }
+
+                Surface(
+                    shape = RoundedCornerShape(4.dp),
+                    color = SurfaceContainerLowestDark.copy(alpha = 0.85f),
+                    modifier = Modifier
+                        .align(Alignment.BottomEnd)
+                        .padding(8.dp)
+                ) {
+                    Text(
+                        formatDuration(video.duration),
+                        color = OnSurfaceDark,
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp)
+                    )
+                }
+
+                val progress = if (video.duration > 0) (video.resumePosition.toFloat() / video.duration).coerceIn(0f, 1f) else 0.5f
+                LinearProgressIndicator(
+                    progress = { progress },
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .fillMaxWidth()
+                        .height(3.dp),
+                    color = PrimaryCyan,
+                    trackColor = OutlineVariantDark.copy(alpha = 0.6f)
+                )
+            }
+
+            Column(modifier = Modifier.padding(10.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        video.name,
+                        color = OnSurfaceDark,
+                        fontWeight = FontWeight.SemiBold,
+                        fontSize = 13.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f)
+                    )
+
+                    Box {
+                        IconButton(
+                            onClick = { showMenu = true },
+                            modifier = Modifier.size(24.dp)
+                        ) {
+                            Icon(
+                                Icons.Default.MoreVert,
+                                contentDescription = "More options",
+                                tint = OnSurfaceVariantDark,
+                                modifier = Modifier.size(16.dp)
+                            )
+                        }
+
+                        DropdownMenu(
+                            expanded = showMenu,
+                            onDismissRequest = { showMenu = false },
+                            modifier = Modifier.background(SurfaceContainerDark)
+                        ) {
+                            DropdownMenuItem(
+                                text = { Text("Play Video", color = OnSurfaceDark) },
+                                leadingIcon = { Icon(Icons.Default.PlayArrow, contentDescription = null, tint = PrimaryCyan) },
+                                onClick = {
+                                    showMenu = false
+                                    onClick()
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Details", color = OnSurfaceDark) },
+                                leadingIcon = { Icon(Icons.Default.Info, contentDescription = null, tint = OnSurfaceVariantDark) },
+                                onClick = {
+                                    showMenu = false
+                                    onInfoClick()
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Delete Video", color = MaterialTheme.colorScheme.error) },
+                                leadingIcon = { Icon(Icons.Default.Delete, contentDescription = null, tint = MaterialTheme.colorScheme.error) },
+                                onClick = {
+                                    showMenu = false
+                                    onDeleteClick()
+                                }
+                            )
+                        }
+                    }
+                }
+                Spacer(modifier = Modifier.height(4.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Default.Replay, contentDescription = null, tint = PrimaryCyan, modifier = Modifier.size(12.dp))
+                        Spacer(modifier = Modifier.width(3.dp))
+                        Text(
+                            "Resume at ${formatDuration(video.resumePosition)}",
+                            color = PrimaryCyan,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Medium
+                        )
+                    }
+                    Text(
+                        formatFileSize(video.size),
+                        color = OnSurfaceVariantDark,
+                        fontSize = 11.sp
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun FolderListItem(
+    folder: VideoFolder,
+    imageLoader: ImageLoader,
+    onClick: () -> Unit
+) {
+    Card(
+        onClick = onClick,
+        shape = RoundedCornerShape(12.dp),
+        colors = CardDefaults.cardColors(containerColor = SurfaceContainerDark),
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 4.dp)
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(12.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
+                Box(
+                    modifier = Modifier
+                        .size(48.dp)
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(
+                            when {
+                                folder.name.contains("Camera", ignoreCase = true) -> PrimaryContainerCyan.copy(alpha = 0.2f)
+                                folder.name.contains("Movie", ignoreCase = true) -> SecondaryContainerBlue.copy(alpha = 0.2f)
+                                folder.name.contains("Download", ignoreCase = true) -> TertiaryContainerAmber.copy(alpha = 0.2f)
+                                else -> SurfaceContainerHighestDark
+                            }
+                        ),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        when {
+                            folder.name.contains("Camera", ignoreCase = true) -> Icons.Default.Videocam
+                            folder.name.contains("Movie", ignoreCase = true) -> Icons.Default.Movie
+                            folder.name.contains("Download", ignoreCase = true) -> Icons.Default.Download
+                            folder.name.contains("WhatsApp", ignoreCase = true) -> Icons.Default.Chat
+                            folder.name.contains("Screen", ignoreCase = true) -> Icons.Default.Screenshot
+                            else -> Icons.Default.Folder
+                        },
+                        contentDescription = null,
+                        tint = handleFolderTint(folder.name),
+                        modifier = Modifier.size(24.dp)
+                    )
+                }
+
+                Spacer(modifier = Modifier.width(12.dp))
+
+                Column {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            folder.name,
+                            color = OnSurfaceDark,
+                            fontWeight = FontWeight.SemiBold,
+                            fontSize = 15.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        if (folder.isNew) {
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Surface(
+                                shape = RoundedCornerShape(4.dp),
+                                color = TertiaryContainerAmber
+                            ) {
+                                Text(
+                                    "NEW",
+                                    fontSize = 9.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = OnTertiaryAmber,
+                                    modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
+                                )
+                            }
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(2.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("${folder.videoCount} videos", color = OnSurfaceVariantDark, fontSize = 12.sp)
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Box(modifier = Modifier.size(3.dp).clip(CircleShape).background(OutlineVariantDark))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(formatFileSize(folder.totalSizeBytes), color = OnSurfaceVariantDark, fontSize = 12.sp)
+                    }
+                }
+            }
+
+            Icon(
+                Icons.AutoMirrored.Filled.ArrowForward,
+                contentDescription = "Open",
+                tint = OnSurfaceVariantDark,
+                modifier = Modifier.size(18.dp)
+            )
+        }
+    }
+}
+
+private fun handleFolderTint(name: String): Color {
+    return when {
+        name.contains("Camera", ignoreCase = true) -> PrimaryCyan
+        name.contains("Movie", ignoreCase = true) -> SecondaryBlue
+        name.contains("Download", ignoreCase = true) -> TertiaryAmber
+        else -> OnSurfaceDark
+    }
+}
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+fun VideoListItemCard(
+    video: VideoItem,
+    imageLoader: ImageLoader,
+    onClick: () -> Unit,
+    onLongClick: () -> Unit = {},
+    onDeleteClick: () -> Unit = {},
+    onInfoClick: () -> Unit = {}
+) {
+    val haptic = LocalHapticFeedback.current
+    var showMenu by remember { mutableStateOf(false) }
+
+    Card(
+        shape = RoundedCornerShape(12.dp),
+        colors = CardDefaults.cardColors(containerColor = SurfaceContainerDark),
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 4.dp)
+            .combinedClickable(
+                onClick = onClick,
+                onLongClick = {
+                    haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                    onLongClick()
+                }
+            )
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(10.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(90.dp, 56.dp)
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(SurfaceContainerHighestDark)
+            ) {
+                AsyncImage(
+                    model = ImageRequest.Builder(LocalContext.current)
+                        .data(video.uri)
+                        .videoFrameMillis(1000)
+                        .crossfade(true)
+                        .build(),
+                    imageLoader = imageLoader,
+                    contentDescription = null,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize()
+                )
+
+                Surface(
+                    shape = RoundedCornerShape(3.dp),
+                    color = SurfaceContainerLowestDark.copy(alpha = 0.85f),
+                    modifier = Modifier.align(Alignment.BottomEnd).padding(3.dp)
+                ) {
+                    Text(
+                        formatDuration(video.duration),
+                        color = OnSurfaceDark,
+                        fontSize = 9.sp,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.padding(horizontal = 3.dp, vertical = 1.dp)
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.width(12.dp))
+
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    video.name,
+                    color = OnSurfaceDark,
+                    fontWeight = FontWeight.SemiBold,
+                    fontSize = 14.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Spacer(modifier = Modifier.height(3.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Surface(
+                        shape = RoundedCornerShape(3.dp),
+                        color = SurfaceContainerHighestDark
+                    ) {
+                        Text(
+                            video.resolution,
+                            color = PrimaryCyan,
+                            fontSize = 9.sp,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
+                        )
+                    }
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(formatFileSize(video.size), color = OnSurfaceVariantDark, fontSize = 11.sp)
+                }
+            }
+
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                IconButton(onClick = onClick) {
+                    Icon(Icons.Default.PlayCircle, contentDescription = "Play", tint = PrimaryCyan, modifier = Modifier.size(28.dp))
+                }
+
+                Box {
+                    IconButton(onClick = { showMenu = true }, modifier = Modifier.size(32.dp)) {
+                        Icon(
+                            Icons.Default.MoreVert,
+                            contentDescription = "Options",
+                            tint = OnSurfaceVariantDark,
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
+
+                    DropdownMenu(
+                        expanded = showMenu,
+                        onDismissRequest = { showMenu = false },
+                        modifier = Modifier.background(SurfaceContainerDark)
+                    ) {
+                        DropdownMenuItem(
+                            text = { Text("Play", color = OnSurfaceDark) },
+                            leadingIcon = { Icon(Icons.Default.PlayArrow, contentDescription = null, tint = PrimaryCyan) },
+                            onClick = {
+                                showMenu = false
+                                onClick()
+                            }
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Details", color = OnSurfaceDark) },
+                            leadingIcon = { Icon(Icons.Default.Info, contentDescription = null, tint = OnSurfaceVariantDark) },
+                            onClick = {
+                                showMenu = false
+                                onInfoClick()
+                            }
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Delete Video", color = MaterialTheme.colorScheme.error) },
+                            leadingIcon = { Icon(Icons.Default.Delete, contentDescription = null, tint = MaterialTheme.colorScheme.error) },
+                            onClick = {
+                                showMenu = false
+                                onDeleteClick()
+                            }
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+fun VideoGridCard(
+    video: VideoItem,
+    imageLoader: ImageLoader,
+    onClick: () -> Unit,
+    onLongClick: () -> Unit = {},
+    onDeleteClick: () -> Unit = {},
+    onInfoClick: () -> Unit = {}
+) {
+    val haptic = LocalHapticFeedback.current
+    var showMenu by remember { mutableStateOf(false) }
+
+    Card(
+        shape = RoundedCornerShape(12.dp),
+        colors = CardDefaults.cardColors(containerColor = SurfaceContainerDark),
+        modifier = Modifier
+            .fillMaxWidth()
+            .combinedClickable(
+                onClick = onClick,
+                onLongClick = {
+                    haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                    onLongClick()
+                }
+            )
+    ) {
+        Column {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .aspectRatio(16f / 10f)
+                    .background(SurfaceContainerHighestDark)
+            ) {
+                AsyncImage(
+                    model = ImageRequest.Builder(LocalContext.current)
+                        .data(video.uri)
+                        .videoFrameMillis(1000)
+                        .crossfade(true)
+                        .build(),
+                    imageLoader = imageLoader,
+                    contentDescription = null,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize()
+                )
+
+                Row(
+                    modifier = Modifier
+                        .align(Alignment.TopStart)
+                        .padding(6.dp),
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Surface(
+                        shape = RoundedCornerShape(3.dp),
+                        color = SurfaceContainerLowestDark.copy(alpha = 0.85f)
+                    ) {
+                        Text(
+                            video.resolution,
+                            color = PrimaryCyan,
+                            fontSize = 8.sp,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.padding(horizontal = 3.dp, vertical = 1.dp)
+                        )
+                    }
+                }
+
+                Surface(
+                    shape = RoundedCornerShape(3.dp),
+                    color = SurfaceContainerLowestDark.copy(alpha = 0.85f),
+                    modifier = Modifier
+                        .align(Alignment.BottomEnd)
+                        .padding(6.dp)
+                ) {
+                    Text(
+                        formatDuration(video.duration),
+                        color = OnSurfaceDark,
+                        fontSize = 9.sp,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
+                    )
+                }
+            }
+
+            Column(modifier = Modifier.padding(8.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        video.name,
+                        color = OnSurfaceDark,
+                        fontWeight = FontWeight.SemiBold,
+                        fontSize = 12.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f)
+                    )
+
+                    Box {
+                        IconButton(
+                            onClick = { showMenu = true },
+                            modifier = Modifier.size(20.dp)
+                        ) {
+                            Icon(
+                                Icons.Default.MoreVert,
+                                contentDescription = "Options",
+                                tint = OnSurfaceVariantDark,
+                                modifier = Modifier.size(14.dp)
+                            )
+                        }
+
+                        DropdownMenu(
+                            expanded = showMenu,
+                            onDismissRequest = { showMenu = false },
+                            modifier = Modifier.background(SurfaceContainerDark)
+                        ) {
+                            DropdownMenuItem(
+                                text = { Text("Play", color = OnSurfaceDark) },
+                                leadingIcon = { Icon(Icons.Default.PlayArrow, contentDescription = null, tint = PrimaryCyan) },
+                                onClick = {
+                                    showMenu = false
+                                    onClick()
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Details", color = OnSurfaceDark) },
+                                leadingIcon = { Icon(Icons.Default.Info, contentDescription = null, tint = OnSurfaceVariantDark) },
+                                onClick = {
+                                    showMenu = false
+                                    onInfoClick()
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Delete Video", color = MaterialTheme.colorScheme.error) },
+                                leadingIcon = { Icon(Icons.Default.Delete, contentDescription = null, tint = MaterialTheme.colorScheme.error) },
+                                onClick = {
+                                    showMenu = false
+                                    onDeleteClick()
+                                }
+                            )
+                        }
+                    }
+                }
+                Spacer(modifier = Modifier.height(2.dp))
+                Text(
+                    formatFileSize(video.size),
+                    color = OnSurfaceVariantDark,
+                    fontSize = 10.sp
+                )
+            }
+        }
+    }
+}
+
+@Composable
+fun RecentWatchHistoryContent(
+    continueWatching: List<VideoItem>,
+    videos: List<VideoItem>,
+    imageLoader: ImageLoader,
+    onVideoSelected: (VideoItem) -> Unit,
+    onVideoLongClick: (VideoItem) -> Unit = {},
+    onDeleteRequested: (VideoItem) -> Unit = {},
+    onInfoRequested: (VideoItem) -> Unit = {}
+) {
+    val itemsToShow = if (continueWatching.isNotEmpty()) continueWatching else videos.take(6)
+
+    LazyColumn(
+        modifier = Modifier.fillMaxSize(),
+        contentPadding = PaddingValues(16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        item {
+            Text("Playback History", color = OnSurfaceDark, fontWeight = FontWeight.Bold, fontSize = 20.sp)
+            Text("Resume your recently played media files", color = OnSurfaceVariantDark, fontSize = 13.sp)
+            Spacer(modifier = Modifier.height(8.dp))
+        }
+
+        if (itemsToShow.isEmpty()) {
+            item {
+                Box(modifier = Modifier.fillMaxWidth().padding(40.dp), contentAlignment = Alignment.Center) {
+                    Text("No recent playback history yet", color = OnSurfaceVariantDark, fontSize = 14.sp)
+                }
+            }
+        } else {
+            items(itemsToShow, key = { it.id }) { video ->
+                VideoListItemCard(
+                    video = video,
+                    imageLoader = imageLoader,
+                    onClick = { onVideoSelected(video) },
+                    onLongClick = { onVideoLongClick(video) },
+                    onDeleteClick = { onDeleteRequested(video) },
+                    onInfoClick = { onInfoRequested(video) }
+                )
+            }
+        }
+    }
+}
+
+@Composable
+fun DeleteVideoDialog(
+    video: VideoItem,
+    imageLoader: ImageLoader,
+    onDismiss: () -> Unit,
+    onConfirm: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = SurfaceContainerDark,
+        shape = RoundedCornerShape(20.dp),
+        icon = {
+            Box(
+                modifier = Modifier
+                    .size(48.dp)
+                    .clip(CircleShape)
+                    .background(MaterialTheme.colorScheme.errorContainer),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = Icons.Default.DeleteForever,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onErrorContainer,
+                    modifier = Modifier.size(28.dp)
+                )
+            }
+        },
+        title = {
+            Text(
+                "Delete Video?",
+                color = OnSurfaceDark,
+                fontWeight = FontWeight.Bold,
+                fontSize = 19.sp
+            )
+        },
+        text = {
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Card(
+                    colors = CardDefaults.cardColors(containerColor = SurfaceContainerHighestDark),
+                    shape = RoundedCornerShape(12.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        modifier = Modifier.padding(10.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(70.dp, 44.dp)
+                                .clip(RoundedCornerShape(6.dp))
+                                .background(SurfaceContainerLowestDark)
+                        ) {
+                            AsyncImage(
+                                model = ImageRequest.Builder(LocalContext.current)
+                                    .data(video.uri)
+                                    .videoFrameMillis(1000)
+                                    .crossfade(true)
+                                    .build(),
+                                imageLoader = imageLoader,
+                                contentDescription = null,
+                                contentScale = ContentScale.Crop,
+                                modifier = Modifier.fillMaxSize()
+                            )
+                        }
+                        Spacer(modifier = Modifier.width(10.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = video.name,
+                                color = OnSurfaceDark,
+                                fontWeight = FontWeight.SemiBold,
+                                fontSize = 13.sp,
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            Spacer(modifier = Modifier.height(2.dp))
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text(
+                                    text = formatFileSize(video.size),
+                                    color = OnSurfaceVariantDark,
+                                    fontSize = 11.sp
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(
+                                    text = "•",
+                                    color = OutlineDark,
+                                    fontSize = 11.sp
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(
+                                    text = formatDuration(video.duration),
+                                    color = OnSurfaceVariantDark,
+                                    fontSize = 11.sp
+                                )
+                            }
+                        }
+                    }
+                }
+
+                Text(
+                    text = "Are you sure you want to delete this video file from your device? This action cannot be undone.",
+                    color = OnSurfaceVariantDark,
+                    fontSize = 13.sp,
+                    lineHeight = 18.sp
+                )
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = onConfirm,
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = MaterialTheme.colorScheme.error,
+                    contentColor = MaterialTheme.colorScheme.onError
+                ),
+                shape = RoundedCornerShape(10.dp)
+            ) {
+                Icon(Icons.Default.Delete, contentDescription = null, modifier = Modifier.size(16.dp))
+                Spacer(modifier = Modifier.width(6.dp))
+                Text("Delete", fontWeight = FontWeight.Bold)
+            }
+        },
+        dismissButton = {
+            TextButton(
+                onClick = onDismiss,
+                shape = RoundedCornerShape(10.dp)
+            ) {
+                Text("Cancel", color = OnSurfaceVariantDark)
+            }
+        }
+    )
+}
+
+@Composable
+fun VideoDetailsDialog(
+    video: VideoItem,
+    onDismiss: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = SurfaceContainerDark,
+        shape = RoundedCornerShape(20.dp),
+        title = {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Default.Info, contentDescription = null, tint = PrimaryCyan)
+                Spacer(modifier = Modifier.width(8.dp))
+                Text("Video Details", color = OnSurfaceDark, fontWeight = FontWeight.Bold, fontSize = 18.sp)
+            }
+        },
+        text = {
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                DetailRow(label = "Title", value = video.name)
+                DetailRow(label = "Resolution", value = video.resolution)
+                DetailRow(label = "Duration", value = formatDuration(video.duration))
+                DetailRow(label = "File Size", value = formatFileSize(video.size))
+                DetailRow(label = "Folder", value = video.bucketName)
+                DetailRow(label = "Decoder", value = "HW+ / HW / SW Accelerated")
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Close", color = PrimaryCyan, fontWeight = FontWeight.Bold)
+            }
+        }
+    )
+}
+
+@Composable
+fun DetailRow(label: String, value: String) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.Top
+    ) {
+        Text(label, color = OnSurfaceVariantDark, fontSize = 12.sp, modifier = Modifier.weight(0.35f))
+        Text(value, color = OnSurfaceDark, fontSize = 12.sp, fontWeight = FontWeight.Medium, modifier = Modifier.weight(0.65f))
+    }
+}
+
+@Composable
+fun NetworkStreamContent(
+    recentStreams: List<String>,
+    onPlayStream: (String) -> Unit
+) {
+    var inputUrl by remember { mutableStateOf("") }
+
+    LazyColumn(
+        modifier = Modifier.fillMaxSize(),
+        contentPadding = PaddingValues(16.dp),
+        verticalArrangement = Arrangement.spacedBy(16.dp)
+    ) {
+        item {
+            Text("Network Streaming", color = OnSurfaceDark, fontWeight = FontWeight.Bold, fontSize = 20.sp)
+            Text("Stream remote videos directly with hardware acceleration", color = OnSurfaceVariantDark, fontSize = 13.sp)
+        }
+
+        item {
+            Card(
+                shape = RoundedCornerShape(14.dp),
+                colors = CardDefaults.cardColors(containerColor = SurfaceContainerDark),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(modifier = Modifier.padding(14.dp)) {
+                    Text("Direct Stream URL", color = PrimaryCyan, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                    Spacer(modifier = Modifier.height(8.dp))
+                    OutlinedTextField(
+                        value = inputUrl,
+                        onValueChange = { inputUrl = it },
+                        placeholder = { Text("https://example.com/live/stream.m3u8", color = OutlineDark, fontSize = 13.sp) },
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = PrimaryCyan,
+                            unfocusedBorderColor = OutlineVariantDark,
+                            focusedTextColor = OnSurfaceDark,
+                            unfocusedTextColor = OnSurfaceDark
+                        ),
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Button(
+                        onClick = { if (inputUrl.isNotBlank()) onPlayStream(inputUrl) },
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = ButtonDefaults.buttonColors(containerColor = PrimaryCyan, contentColor = OnPrimaryCyan),
+                        shape = RoundedCornerShape(8.dp)
+                    ) {
+                        Icon(Icons.Default.PlayArrow, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("Stream Video", fontWeight = FontWeight.Bold)
+                    }
+                }
+            }
+        }
+
+        item {
+            Text("Demo & Test Streams", color = OnSurfaceDark, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+        }
+
+        items(recentStreams) { url ->
+            Card(
+                onClick = { onPlayStream(url) },
+                shape = RoundedCornerShape(10.dp),
+                colors = CardDefaults.cardColors(containerColor = SurfaceContainerDark),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(12.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(Icons.Default.Link, contentDescription = null, tint = PrimaryCyan, modifier = Modifier.size(20.dp))
+                    Spacer(modifier = Modifier.width(10.dp))
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            url.substringAfterLast("/"),
+                            color = OnSurfaceDark,
+                            fontWeight = FontWeight.SemiBold,
+                            fontSize = 13.sp
+                        )
+                        Text(
+                            url,
+                            color = OnSurfaceVariantDark,
+                            fontSize = 11.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                    IconButton(onClick = { onPlayStream(url) }) {
+                        Icon(Icons.Default.PlayCircle, contentDescription = null, tint = PrimaryCyan)
                     }
                 }
             }
@@ -275,90 +1866,163 @@ fun VideoScreen(
 }
 
 @Composable
-fun VideoItemCard(video: VideoItem, onClick: () -> Unit) {
-    val context = LocalContext.current
-    val imageLoader = remember {
-        ImageLoader.Builder(context)
-            .components {
-                add(VideoFrameDecoder.Factory())
-            }
-            .build()
-    }
-    
-    val durationSec = video.duration / 1000
-    val durationFormatted = if (durationSec >= 3600) {
-        String.format("%02d:%02d:%02d", durationSec / 3600, (durationSec % 3600) / 60, durationSec % 60)
-    } else {
-        String.format("%02d:%02d", durationSec / 60, durationSec % 60)
-    }
-
-    Card(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clickable { onClick() },
-        colors = CardDefaults.cardColors(
-            containerColor = Color.Transparent
-        )
+fun MeSettingsContent(
+    decoderMode: DecoderMode,
+    storageStats: StorageStats,
+    totalVideosCount: Int,
+    onSelectDecoder: (DecoderMode) -> Unit,
+    onRescan: () -> Unit
+) {
+    LazyColumn(
+        modifier = Modifier.fillMaxSize(),
+        contentPadding = PaddingValues(16.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(vertical = 8.dp),
-            verticalAlignment = Alignment.Top
-        ) {
-            Box(
-                modifier = Modifier
-                    .width(140.dp)
-                    .aspectRatio(16f/9f)
+        item {
+            Card(
+                shape = RoundedCornerShape(16.dp),
+                colors = CardDefaults.cardColors(containerColor = SurfaceContainerDark),
+                modifier = Modifier.fillMaxWidth()
             ) {
-                AsyncImage(
-                    model = video.uri,
-                    imageLoader = imageLoader,
-                    contentDescription = "Thumbnail",
-                    contentScale = ContentScale.Crop,
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .clip(RoundedCornerShape(8.dp))
-                        .background(Color.DarkGray)
-                )
-                Box(
-                    modifier = Modifier
-                        .align(Alignment.BottomEnd)
-                        .padding(4.dp)
-                        .background(Color.Black.copy(alpha = 0.7f), RoundedCornerShape(4.dp))
-                        .padding(horizontal = 4.dp, vertical = 2.dp)
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(16.dp),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text(
-                        text = durationFormatted,
-                        style = MaterialTheme.typography.labelSmall,
-                        color = Color.White
-                    )
+                    Box(
+                        modifier = Modifier
+                            .size(54.dp)
+                            .clip(CircleShape)
+                            .background(PrimaryCyan),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(Icons.Default.Person, contentDescription = null, tint = OnPrimaryCyan, modifier = Modifier.size(32.dp))
+                    }
+                    Spacer(modifier = Modifier.width(14.dp))
+                    Column {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text("VDOFLY User", color = OnSurfaceDark, fontWeight = FontWeight.Bold, fontSize = 17.sp)
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Surface(shape = RoundedCornerShape(4.dp), color = TertiaryContainerAmber) {
+                                Text("PRO", fontSize = 9.sp, fontWeight = FontWeight.Bold, color = OnTertiaryAmber, modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp))
+                            }
+                        }
+                        Text("$totalVideosCount Local Videos Available", color = OnSurfaceVariantDark, fontSize = 12.sp)
+                    }
                 }
             }
-            Spacer(modifier = Modifier.width(12.dp))
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = video.name,
-                    style = MaterialTheme.typography.bodyLarge,
-                    color = MaterialTheme.colorScheme.onSurface,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis
-                )
-                Spacer(modifier = Modifier.height(4.dp))
-                val sizeMb = video.size / (1024 * 1024)
-                Text(
-                    text = "$sizeMb MB",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
-            IconButton(onClick = {}, modifier = Modifier.align(Alignment.CenterVertically)) {
-                Icon(
-                    imageVector = Icons.Default.MoreVert,
-                    contentDescription = "More Options",
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant
-                )
+        }
+
+        item {
+            Text("PLAYBACK ENGINE", color = PrimaryCyan, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+        }
+
+        item {
+            Card(
+                shape = RoundedCornerShape(12.dp),
+                colors = CardDefaults.cardColors(containerColor = SurfaceContainerDark),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(modifier = Modifier.padding(14.dp)) {
+                    Text("Hardware Decoder", color = OnSurfaceDark, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+                    Text("Choose rendering engine for optimal battery and performance", color = OnSurfaceVariantDark, fontSize = 12.sp)
+                    Spacer(modifier = Modifier.height(10.dp))
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        DecoderButton("HW+", isSelected = decoderMode == DecoderMode.HW_PLUS) { onSelectDecoder(DecoderMode.HW_PLUS) }
+                        DecoderButton("HW", isSelected = decoderMode == DecoderMode.HW) { onSelectDecoder(DecoderMode.HW) }
+                        DecoderButton("SW", isSelected = decoderMode == DecoderMode.SW) { onSelectDecoder(DecoderMode.SW) }
+                    }
+                }
             }
         }
+
+        item {
+            Text("GESTURE CONTROLS", color = PrimaryCyan, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+        }
+
+        item {
+            Card(
+                shape = RoundedCornerShape(12.dp),
+                colors = CardDefaults.cardColors(containerColor = SurfaceContainerDark),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    GestureRow(icon = Icons.Default.BrightnessMedium, title = "Left Side Swipe", desc = "Adjust Screen Brightness")
+                    GestureRow(icon = Icons.Default.VolumeUp, title = "Right Side Swipe", desc = "Adjust Media Volume")
+                    GestureRow(icon = Icons.Default.FastForward, title = "Double Tap Sides", desc = "Seek ±10 Seconds with visual ripple")
+                    GestureRow(icon = Icons.Default.TouchApp, title = "Horizontal Drag", desc = "Precise Frame Timeline Scrubbing")
+                }
+            }
+        }
+
+        item {
+            Card(
+                onClick = onRescan,
+                shape = RoundedCornerShape(12.dp),
+                colors = CardDefaults.cardColors(containerColor = SurfaceContainerDark),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(14.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column {
+                        Text("VDOFLY Android Edition", color = OnSurfaceDark, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+                        Text("Version 1.0.0 (Release Build)", color = OnSurfaceVariantDark, fontSize = 12.sp)
+                    }
+                    Icon(Icons.Default.Sync, contentDescription = null, tint = PrimaryCyan)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun DecoderButton(name: String, isSelected: Boolean, onClick: () -> Unit) {
+    Surface(
+        onClick = onClick,
+        shape = RoundedCornerShape(8.dp),
+        color = if (isSelected) PrimaryContainerCyan else SurfaceContainerHighestDark,
+        contentColor = if (isSelected) OnPrimaryCyan else OnSurfaceDark
+    ) {
+        Text(
+            name,
+            fontWeight = FontWeight.Bold,
+            fontSize = 12.sp,
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+        )
+    }
+}
+
+@Composable
+fun GestureRow(icon: ImageVector, title: String, desc: String) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Icon(icon, contentDescription = null, tint = PrimaryCyan, modifier = Modifier.size(20.dp))
+        Spacer(modifier = Modifier.width(10.dp))
+        Column {
+            Text(title, color = OnSurfaceDark, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+            Text(desc, color = OnSurfaceVariantDark, fontSize = 11.sp)
+        }
+    }
+}
+
+fun formatDuration(millis: Long): String {
+    val totalSeconds = (millis / 1000).coerceAtLeast(0)
+    val minutes = totalSeconds / 60
+    val seconds = totalSeconds % 60
+    val hours = minutes / 60
+    return if (hours > 0) {
+        String.format("%d:%02d:%02d", hours, minutes % 60, seconds)
+    } else {
+        String.format("%02d:%02d", minutes, seconds)
+    }
+}
+
+fun formatFileSize(bytes: Long): String {
+    val mb = bytes / (1024f * 1024f)
+    return if (mb >= 1024f) {
+        String.format("%.1f GB", mb / 1024f)
+    } else {
+        String.format("%.1f MB", mb)
     }
 }
