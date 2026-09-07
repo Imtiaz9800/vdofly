@@ -12,6 +12,7 @@ import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
+import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -100,11 +101,31 @@ class VideoViewModel(application: Application) : AndroidViewModel(application) {
     private val _storageStats = MutableStateFlow(calculateStorage())
     val storageStats: StateFlow<StorageStats> = _storageStats.asStateFlow()
 
+    private val HIDDEN_VIDEOS_KEY = stringSetPreferencesKey("hidden_video_uris_set")
+    private val VAULT_PIN_KEY = stringPreferencesKey("vault_security_pin_val")
+
     private val _videoPositions = MutableStateFlow<Map<String, Long>>(emptyMap())
     val videoPositions: StateFlow<Map<String, Long>> = _videoPositions.asStateFlow()
 
-    val continueWatchingVideos: StateFlow<List<VideoItem>> = combine(_videos, _videoPositions) { vids, posMap ->
-        vids.mapNotNull { video ->
+    private val _hiddenVideoUris = MutableStateFlow<Set<String>>(emptySet())
+    val hiddenVideoUris: StateFlow<Set<String>> = _hiddenVideoUris.asStateFlow()
+
+    private val _vaultPin = MutableStateFlow<String?>(null)
+    val vaultPin: StateFlow<String?> = _vaultPin.asStateFlow()
+
+    private val _isVaultUnlocked = MutableStateFlow(false)
+    val isVaultUnlocked: StateFlow<Boolean> = _isVaultUnlocked.asStateFlow()
+
+    val hiddenVideosCount: StateFlow<Int> = combine(_videos, _hiddenVideoUris) { vids, hiddenUris ->
+        vids.count { hiddenUris.contains(it.uri.toString()) }
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 0)
+
+    val visibleVideosCount: StateFlow<Int> = combine(_videos, _hiddenVideoUris) { vids, hiddenUris ->
+        vids.count { !hiddenUris.contains(it.uri.toString()) }
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 0)
+
+    val continueWatchingVideos: StateFlow<List<VideoItem>> = combine(_videos, _videoPositions, _hiddenVideoUris) { vids, posMap, hiddenUris ->
+        vids.filter { !hiddenUris.contains(it.uri.toString()) }.mapNotNull { video ->
             val pos = posMap[video.uri.toString()] ?: 0L
             if (pos > 1000L) { // Watched at least 1s
                 video.copy(resumePosition = pos)
@@ -112,8 +133,9 @@ class VideoViewModel(application: Application) : AndroidViewModel(application) {
         }.take(8)
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
-    val folders: StateFlow<List<VideoFolder>> = _videos.map { vids ->
-        val grouped = vids.groupBy { it.bucketName }
+    val folders: StateFlow<List<VideoFolder>> = combine(_videos, _hiddenVideoUris) { vids, hiddenUris ->
+        val visibleVideos = vids.filter { !hiddenUris.contains(it.uri.toString()) }
+        val grouped = visibleVideos.groupBy { it.bucketName }
         grouped.map { (folderName, items) ->
             VideoFolder(
                 name = folderName,
@@ -132,23 +154,32 @@ class VideoViewModel(application: Application) : AndroidViewModel(application) {
                 if (pos > 0) video.copy(resumePosition = pos) else video
             }
         },
+        _hiddenVideoUris,
         _searchQuery,
         _sortOrder,
-        _selectedFilter,
-        _selectedFolder
-    ) { listWithPositions, query, sort, filter, folder ->
+        combine(_selectedFilter, _selectedFolder) { filter, folder -> Pair(filter, folder) }
+    ) { listWithPositions, hiddenUris, query, sort, filterAndFolder ->
+        val (filter, folder) = filterAndFolder
         var list = listWithPositions
 
-        if (folder != null) {
-            list = list.filter { it.bucketName.equals(folder, ignoreCase = true) }
-        }
+        if (filter == FilterCategory.HIDDEN) {
+            // Display only protected/hidden videos in Private Safe
+            list = list.filter { hiddenUris.contains(it.uri.toString()) }
+        } else {
+            // Completely hide private videos from main library and folders
+            list = list.filter { !hiddenUris.contains(it.uri.toString()) }
 
-        list = when (filter) {
-            FilterCategory.ALL_FOLDERS, FilterCategory.VIDEOS -> list
-            FilterCategory.DOWNLOADED -> list.filter { it.bucketName.contains("download", ignoreCase = true) }
-            FilterCategory.WHATSAPP -> list.filter { it.bucketName.contains("whatsapp", ignoreCase = true) }
-            FilterCategory.CAMERA -> list.filter { it.bucketName.contains("camera", ignoreCase = true) || it.bucketName.contains("dcim", ignoreCase = true) }
-            FilterCategory.HIDDEN -> emptyList()
+            if (folder != null) {
+                list = list.filter { it.bucketName.equals(folder, ignoreCase = true) }
+            }
+
+            list = when (filter) {
+                FilterCategory.ALL_FOLDERS, FilterCategory.VIDEOS -> list
+                FilterCategory.DOWNLOADED -> list.filter { it.bucketName.contains("download", ignoreCase = true) }
+                FilterCategory.WHATSAPP -> list.filter { it.bucketName.contains("whatsapp", ignoreCase = true) }
+                FilterCategory.CAMERA -> list.filter { it.bucketName.contains("camera", ignoreCase = true) || it.bucketName.contains("dcim", ignoreCase = true) }
+                FilterCategory.HIDDEN -> list
+            }
         }
 
         if (query.isNotBlank()) {
@@ -168,6 +199,7 @@ class VideoViewModel(application: Application) : AndroidViewModel(application) {
 
     init {
         loadSavedPositions()
+        loadVaultPreferences()
     }
 
     fun onPermissionGranted() {
@@ -250,7 +282,10 @@ class VideoViewModel(application: Application) : AndroidViewModel(application) {
     fun clearPlaybackHistory() {
         viewModelScope.launch {
             getApplication<Application>().dataStore.edit { prefs ->
-                prefs.clear()
+                val keysToRemove = prefs.asMap().keys.filter { it != HIDDEN_VIDEOS_KEY && it != VAULT_PIN_KEY }
+                keysToRemove.forEach { key ->
+                    prefs.remove(key)
+                }
             }
             _videoPositions.value = emptyMap()
             showToast("Playback history cleared")
@@ -275,6 +310,108 @@ class VideoViewModel(application: Application) : AndroidViewModel(application) {
                 _videoPositions.value = map
             }
         }
+    }
+
+    private fun loadVaultPreferences() {
+        viewModelScope.launch {
+            getApplication<Application>().dataStore.data.collect { prefs ->
+                _hiddenVideoUris.value = prefs[HIDDEN_VIDEOS_KEY] ?: emptySet()
+                _vaultPin.value = prefs[VAULT_PIN_KEY]
+            }
+        }
+    }
+
+    fun hideVideo(uri: Uri) {
+        viewModelScope.launch {
+            val uriStr = uri.toString()
+            val newSet = _hiddenVideoUris.value + uriStr
+            _hiddenVideoUris.value = newSet
+            getApplication<Application>().dataStore.edit { prefs ->
+                prefs[HIDDEN_VIDEOS_KEY] = newSet
+            }
+            showToast("Video moved to Private Safe Folder")
+        }
+    }
+
+    fun hideFolder(folderName: String) {
+        viewModelScope.launch {
+            val folderVideos = _videos.value.filter { it.bucketName.equals(folderName, ignoreCase = true) }
+            if (folderVideos.isEmpty()) return@launch
+            val urisToAdd = folderVideos.map { it.uri.toString() }.toSet()
+            val newSet = _hiddenVideoUris.value + urisToAdd
+            _hiddenVideoUris.value = newSet
+            getApplication<Application>().dataStore.edit { prefs ->
+                prefs[HIDDEN_VIDEOS_KEY] = newSet
+            }
+            showToast("Folder '$folderName' (${folderVideos.size} files) moved to Private Safe")
+        }
+    }
+
+    fun unhideFolder(folderName: String) {
+        viewModelScope.launch {
+            val folderVideos = _videos.value.filter { it.bucketName.equals(folderName, ignoreCase = true) }
+            if (folderVideos.isEmpty()) return@launch
+            val urisToRemove = folderVideos.map { it.uri.toString() }.toSet()
+            val newSet = _hiddenVideoUris.value - urisToRemove
+            _hiddenVideoUris.value = newSet
+            getApplication<Application>().dataStore.edit { prefs ->
+                prefs[HIDDEN_VIDEOS_KEY] = newSet
+            }
+            showToast("Folder '$folderName' restored to public library")
+        }
+    }
+
+    fun unhideVideo(uri: Uri) {
+        viewModelScope.launch {
+            val uriStr = uri.toString()
+            val newSet = _hiddenVideoUris.value - uriStr
+            _hiddenVideoUris.value = newSet
+            getApplication<Application>().dataStore.edit { prefs ->
+                prefs[HIDDEN_VIDEOS_KEY] = newSet
+            }
+            showToast("Video restored to public library")
+        }
+    }
+
+    fun isVideoHidden(uri: Uri): Boolean {
+        return _hiddenVideoUris.value.contains(uri.toString())
+    }
+
+    fun setVaultPin(pin: String) {
+        viewModelScope.launch {
+            _vaultPin.value = pin
+            getApplication<Application>().dataStore.edit { prefs ->
+                prefs[VAULT_PIN_KEY] = pin
+            }
+            _isVaultUnlocked.value = true
+            showToast("Private Folder PIN saved")
+        }
+    }
+
+    fun verifyVaultPin(pin: String): Boolean {
+        val currentPin = _vaultPin.value
+        val isValid = if (currentPin.isNullOrEmpty()) {
+            setVaultPin(pin)
+            true
+        } else {
+            currentPin == pin
+        }
+        if (isValid) {
+            _isVaultUnlocked.value = true
+        }
+        return isValid
+    }
+
+    fun lockVault() {
+        _isVaultUnlocked.value = false
+        if (_selectedFilter.value == FilterCategory.HIDDEN) {
+            _selectedFilter.value = FilterCategory.ALL_FOLDERS
+        }
+        showToast("Private Safe Folder locked")
+    }
+
+    fun unlockVault() {
+        _isVaultUnlocked.value = true
     }
 
     private fun loadVideos() {

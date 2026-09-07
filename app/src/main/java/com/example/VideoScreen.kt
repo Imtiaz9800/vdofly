@@ -21,6 +21,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.ArrowForward
@@ -40,6 +41,8 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -76,6 +79,10 @@ fun VideoScreen(
     val toastMessage by viewModel.toastMessage.collectAsStateWithLifecycle()
     val decoderMode by viewModel.decoderMode.collectAsStateWithLifecycle()
     val recentStreams by viewModel.recentStreams.collectAsStateWithLifecycle()
+    val isVaultUnlocked by viewModel.isVaultUnlocked.collectAsStateWithLifecycle()
+    val vaultPin by viewModel.vaultPin.collectAsStateWithLifecycle()
+    val hiddenVideosCount by viewModel.hiddenVideosCount.collectAsStateWithLifecycle()
+    val hiddenVideoUris by viewModel.hiddenVideoUris.collectAsStateWithLifecycle()
 
     var currentTab by remember { mutableStateOf(BottomNavTab.LOCAL) }
     var showSearchField by remember { mutableStateOf(false) }
@@ -86,8 +93,71 @@ fun VideoScreen(
     var showCastDialog by remember { mutableStateOf(false) }
     var streamUrlInput by remember { mutableStateOf("") }
     var pinInput by remember { mutableStateOf("") }
+    var pinErrorText by remember { mutableStateOf<String?>(null) }
+    var isChangingPin by remember { mutableStateOf(false) }
+    var videoPendingHide by remember { mutableStateOf<VideoItem?>(null) }
+    var folderPendingHide by remember { mutableStateOf<String?>(null) }
     var videoToDelete by remember { mutableStateOf<VideoItem?>(null) }
     var videoDetailsToShow by remember { mutableStateOf<VideoItem?>(null) }
+
+    val onToggleLockVideo: (VideoItem) -> Unit = { video ->
+        if (hiddenVideoUris.contains(video.uri.toString())) {
+            viewModel.unhideVideo(video.uri)
+        } else {
+            if (vaultPin.isNullOrEmpty()) {
+                videoPendingHide = video
+                folderPendingHide = null
+                pinInput = ""
+                pinErrorText = null
+                isChangingPin = false
+                showPrivateVaultDialog = true
+            } else {
+                viewModel.hideVideo(video.uri)
+            }
+        }
+    }
+
+    val onToggleLockFolder: (String) -> Unit = { folderName ->
+        if (vaultPin.isNullOrEmpty()) {
+            folderPendingHide = folderName
+            videoPendingHide = null
+            pinInput = ""
+            pinErrorText = null
+            isChangingPin = false
+            showPrivateVaultDialog = true
+        } else {
+            viewModel.hideFolder(folderName)
+        }
+    }
+
+    // Handle back navigation:
+    // 1. If search is active, back dismisses the search bar
+    BackHandler(enabled = showSearchField) {
+        if (searchQuery.isNotEmpty()) {
+            viewModel.updateSearchQuery("")
+        }
+        showSearchField = false
+    }
+
+    // 2. If inside any folder, back exits the folder back to the folder list
+    BackHandler(enabled = !showSearchField && selectedFolder != null) {
+        viewModel.selectFolder(null)
+    }
+
+    // 3. If inside Hidden/Private Safe folder, back returns to all folders
+    BackHandler(enabled = !showSearchField && selectedFolder == null && selectedFilter == FilterCategory.HIDDEN) {
+        viewModel.setFilterCategory(FilterCategory.ALL_FOLDERS)
+    }
+
+    // 4. If a non-default filter category is selected on LOCAL tab, back returns to ALL_FOLDERS
+    BackHandler(enabled = !showSearchField && selectedFolder == null && selectedFilter != FilterCategory.ALL_FOLDERS && selectedFilter != FilterCategory.HIDDEN && currentTab == BottomNavTab.LOCAL) {
+        viewModel.setFilterCategory(FilterCategory.ALL_FOLDERS)
+    }
+
+    // 5. If on another bottom navigation tab, back returns to the LOCAL tab
+    BackHandler(enabled = !showSearchField && selectedFolder == null && currentTab != BottomNavTab.LOCAL) {
+        currentTab = BottomNavTab.LOCAL
+    }
 
     val permissionToRequest = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
         Manifest.permission.READ_MEDIA_VIDEO
@@ -194,8 +264,36 @@ fun VideoScreen(
                         IconButton(onClick = { showSearchField = true }) {
                             Icon(Icons.Default.Search, contentDescription = "Search", tint = OnSurfaceVariantDark)
                         }
-                        IconButton(onClick = { showPrivateVaultDialog = true }) {
-                            Icon(Icons.Default.Lock, contentDescription = "Private Folder", tint = OnSurfaceVariantDark)
+                        IconButton(onClick = {
+                            if (isVaultUnlocked) {
+                                if (selectedFilter == FilterCategory.HIDDEN) {
+                                    viewModel.lockVault()
+                                    viewModel.setFilterCategory(FilterCategory.ALL_FOLDERS)
+                                } else {
+                                    viewModel.setFilterCategory(FilterCategory.HIDDEN)
+                                }
+                            } else {
+                                pinInput = ""
+                                pinErrorText = null
+                                isChangingPin = false
+                                showPrivateVaultDialog = true
+                            }
+                        }) {
+                            BadgedBox(
+                                badge = {
+                                    if (hiddenVideosCount > 0 && !isVaultUnlocked) {
+                                        Badge(containerColor = TertiaryAmber) {
+                                            Text("$hiddenVideosCount", color = OnTertiaryAmber)
+                                        }
+                                    }
+                                }
+                            ) {
+                                Icon(
+                                    imageVector = if (isVaultUnlocked) Icons.Default.LockOpen else Icons.Default.Lock,
+                                    contentDescription = "Private Safe Folder",
+                                    tint = if (isVaultUnlocked) TertiaryAmber else OnSurfaceVariantDark
+                                )
+                            }
                         }
                         IconButton(onClick = { showCastDialog = true }) {
                             Icon(Icons.Default.Cast, contentDescription = "Cast", tint = OnSurfaceVariantDark)
@@ -362,6 +460,23 @@ fun VideoScreen(
                         selectedFolder = selectedFolder,
                         isGridView = isGridView,
                         imageLoader = imageLoader,
+                        isVaultUnlocked = isVaultUnlocked,
+                        hiddenVideosCount = hiddenVideosCount,
+                        hiddenVideoUris = hiddenVideoUris,
+                        onUnlockVaultRequested = {
+                            pinInput = ""
+                            pinErrorText = null
+                            isChangingPin = false
+                            showPrivateVaultDialog = true
+                        },
+                        onChangePinRequested = {
+                            pinInput = ""
+                            pinErrorText = null
+                            isChangingPin = true
+                            showPrivateVaultDialog = true
+                        },
+                        onLockToggle = onToggleLockVideo,
+                        onLockToggleFolder = onToggleLockFolder,
                         onToggleGridView = { isGridView = !isGridView },
                         onVideoSelected = { video ->
                             val index = videos.indexOfFirst { it.id == video.id }
@@ -387,6 +502,7 @@ fun VideoScreen(
                         continueWatching = continueWatching,
                         videos = videos,
                         imageLoader = imageLoader,
+                        hiddenVideoUris = hiddenVideoUris,
                         onClearHistory = { viewModel.clearPlaybackHistory() },
                         onVideoSelected = { video ->
                             val index = videos.indexOfFirst { it.id == video.id }
@@ -400,7 +516,8 @@ fun VideoScreen(
                         },
                         onInfoRequested = { video ->
                             videoDetailsToShow = video
-                        }
+                        },
+                        onLockToggle = onToggleLockVideo
                     )
                 }
                 BottomNavTab.NETWORK -> {
@@ -507,48 +624,176 @@ fun VideoScreen(
     }
 
     if (showPrivateVaultDialog) {
+        val isSettingPin = vaultPin.isNullOrEmpty() || isChangingPin
+        val pendingTargetDesc = when {
+            folderPendingHide != null -> "folder '$folderPendingHide'"
+            videoPendingHide != null -> "video '${videoPendingHide!!.name}'"
+            else -> null
+        }
         AlertDialog(
-            onDismissRequest = { showPrivateVaultDialog = false },
+            onDismissRequest = {
+                showPrivateVaultDialog = false
+                videoPendingHide = null
+                folderPendingHide = null
+                pinErrorText = null
+                isChangingPin = false
+                pinInput = ""
+            },
             containerColor = SurfaceContainerDark,
-            title = {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(Icons.Default.Lock, contentDescription = null, tint = TertiaryAmber)
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text("Private Safe Folder", color = OnSurfaceDark, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+            shape = RoundedCornerShape(24.dp),
+            icon = {
+                Box(
+                    modifier = Modifier
+                        .size(52.dp)
+                        .clip(CircleShape)
+                        .background(TertiaryAmber.copy(alpha = 0.15f)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        if (isSettingPin) Icons.Default.Key else Icons.Default.Lock,
+                        contentDescription = null,
+                        tint = TertiaryAmber,
+                        modifier = Modifier.size(28.dp)
+                    )
                 }
+            },
+            title = {
+                Text(
+                    text = when {
+                        isChangingPin -> "Change Security PIN"
+                        isSettingPin -> "Create Safe Folder PIN"
+                        else -> "Unlock Private Safe"
+                    },
+                    color = OnSurfaceDark,
+                    fontSize = 18.sp,
+                    fontWeight = FontWeight.Bold
+                )
             },
             text = {
                 Column(modifier = Modifier.fillMaxWidth()) {
-                    Text("Enter your 4-digit security PIN to access encrypted video files:", color = OnSurfaceVariantDark, fontSize = 13.sp)
-                    Spacer(modifier = Modifier.height(12.dp))
+                    Text(
+                        text = when {
+                            isSettingPin && pendingTargetDesc != null ->
+                                "Please set a 4-digit PIN first to hide and secure $pendingTargetDesc in your Private Safe."
+                            isSettingPin ->
+                                "Set a 4-digit PIN to encrypt and hide videos and folders in your Private Safe."
+                            pendingTargetDesc != null ->
+                                "Enter your 4-digit PIN to confirm moving $pendingTargetDesc to Private Safe:"
+                            else ->
+                                "Enter your 4-digit security PIN to access protected video files:"
+                        },
+                        color = OnSurfaceVariantDark,
+                        fontSize = 13.sp,
+                        lineHeight = 18.sp
+                    )
+                    Spacer(modifier = Modifier.height(16.dp))
                     OutlinedTextField(
                         value = pinInput,
-                        onValueChange = { if (it.length <= 4) pinInput = it },
+                        onValueChange = {
+                            val digitsOnly = it.filter { ch -> ch.isDigit() }
+                            if (digitsOnly.length <= 4) {
+                                pinInput = digitsOnly
+                                pinErrorText = null
+                            }
+                        },
                         placeholder = { Text("••••", color = OutlineDark) },
+                        keyboardOptions = KeyboardOptions(
+                            keyboardType = KeyboardType.NumberPassword
+                        ),
+                        visualTransformation = PasswordVisualTransformation(),
+                        isError = pinErrorText != null,
                         colors = OutlinedTextFieldDefaults.colors(
                             focusedBorderColor = TertiaryAmber,
                             unfocusedBorderColor = OutlineVariantDark,
                             focusedTextColor = OnSurfaceDark,
-                            unfocusedTextColor = OnSurfaceDark
+                            unfocusedTextColor = OnSurfaceDark,
+                            errorBorderColor = MaterialTheme.colorScheme.error,
+                            errorTextColor = MaterialTheme.colorScheme.error
                         ),
                         singleLine = true,
-                        modifier = Modifier.fillMaxWidth()
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(12.dp)
                     )
+                    if (pinErrorText != null) {
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Text(
+                            text = pinErrorText!!,
+                            color = MaterialTheme.colorScheme.error,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Medium
+                        )
+                    }
                 }
             },
             confirmButton = {
                 Button(
                     onClick = {
-                        showPrivateVaultDialog = false
-                        viewModel.showToast("Private folder unlocked (0 hidden files)")
+                        if (pinInput.length != 4) {
+                            pinErrorText = "PIN must be exactly 4 digits"
+                            return@Button
+                        }
+                        if (isSettingPin) {
+                            viewModel.setVaultPin(pinInput)
+                            isChangingPin = false
+                            if (folderPendingHide != null) {
+                                viewModel.hideFolder(folderPendingHide!!)
+                                folderPendingHide = null
+                            }
+                            if (videoPendingHide != null) {
+                                viewModel.hideVideo(videoPendingHide!!.uri)
+                                videoPendingHide = null
+                            }
+                            showPrivateVaultDialog = false
+                            pinInput = ""
+                            pinErrorText = null
+                        } else {
+                            if (viewModel.verifyVaultPin(pinInput)) {
+                                if (folderPendingHide != null) {
+                                    viewModel.hideFolder(folderPendingHide!!)
+                                    folderPendingHide = null
+                                }
+                                if (videoPendingHide != null) {
+                                    viewModel.hideVideo(videoPendingHide!!.uri)
+                                    videoPendingHide = null
+                                } else {
+                                    viewModel.setFilterCategory(FilterCategory.HIDDEN)
+                                }
+                                showPrivateVaultDialog = false
+                                pinInput = ""
+                                pinErrorText = null
+                            } else {
+                                pinErrorText = "Incorrect PIN. Please try again."
+                            }
+                        }
                     },
-                    colors = ButtonDefaults.buttonColors(containerColor = TertiaryAmber, contentColor = OnTertiaryAmber)
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = TertiaryAmber,
+                        contentColor = OnTertiaryAmber
+                    ),
+                    shape = RoundedCornerShape(10.dp)
                 ) {
-                    Text("Unlock")
+                    Text(
+                        when {
+                            isSettingPin && pendingTargetDesc != null -> "Save PIN & Hide"
+                            isSettingPin -> "Save PIN"
+                            pendingTargetDesc != null -> "Confirm & Hide"
+                            else -> "Unlock"
+                        },
+                        fontWeight = FontWeight.Bold
+                    )
                 }
             },
             dismissButton = {
-                TextButton(onClick = { showPrivateVaultDialog = false }) {
+                TextButton(
+                    onClick = {
+                        showPrivateVaultDialog = false
+                        videoPendingHide = null
+                        folderPendingHide = null
+                        pinErrorText = null
+                        isChangingPin = false
+                        pinInput = ""
+                    }
+                ) {
                     Text("Cancel", color = OnSurfaceVariantDark)
                 }
             }
@@ -597,8 +842,11 @@ fun VideoScreen(
     }
 
     if (videoDetailsToShow != null) {
+        val detailsVideo = videoDetailsToShow!!
         VideoDetailsDialog(
-            video = videoDetailsToShow!!,
+            video = detailsVideo,
+            isLocked = hiddenVideoUris.contains(detailsVideo.uri.toString()),
+            onLockToggle = { onToggleLockVideo(detailsVideo) },
             onDismiss = { videoDetailsToShow = null }
         )
     }
@@ -616,6 +864,13 @@ fun LocalLibraryContent(
     selectedFolder: String?,
     isGridView: Boolean,
     imageLoader: ImageLoader,
+    isVaultUnlocked: Boolean = false,
+    hiddenVideosCount: Int = 0,
+    hiddenVideoUris: Set<String> = emptySet(),
+    onUnlockVaultRequested: () -> Unit = {},
+    onChangePinRequested: () -> Unit = {},
+    onLockToggle: (VideoItem) -> Unit = {},
+    onLockToggleFolder: (String) -> Unit = {},
     onToggleGridView: () -> Unit,
     onVideoSelected: (VideoItem) -> Unit,
     onVideoLongClick: (VideoItem) -> Unit,
@@ -677,10 +932,17 @@ fun LocalLibraryContent(
                 }
                 item {
                     FilterChipItem(
-                        icon = Icons.Default.Lock,
-                        label = "Hidden Folder",
+                        icon = if (isVaultUnlocked) Icons.Default.LockOpen else Icons.Default.Lock,
+                        label = if (isVaultUnlocked) "Private Safe" else "Hidden Folder",
+                        countBadge = if (hiddenVideosCount > 0) "$hiddenVideosCount" else null,
                         isSelected = selectedFilter == FilterCategory.HIDDEN,
-                        onClick = { viewModel.showToast("Safe Folder is locked") }
+                        onClick = {
+                            if (isVaultUnlocked) {
+                                viewModel.setFilterCategory(FilterCategory.HIDDEN)
+                            } else {
+                                onUnlockVaultRequested()
+                            }
+                        }
                     )
                 }
             }
@@ -729,11 +991,90 @@ fun LocalLibraryContent(
                             ContinueWatchingCard(
                                 video = video,
                                 imageLoader = imageLoader,
+                                isLocked = hiddenVideoUris.contains(video.uri.toString()),
                                 onClick = { onVideoSelected(video) },
                                 onLongClick = { onVideoLongClick(video) },
                                 onDeleteClick = { onDeleteRequested(video) },
-                                onInfoClick = { onInfoRequested(video) }
+                                onInfoClick = { onInfoRequested(video) },
+                                onLockToggle = { onLockToggle(video) }
                             )
+                        }
+                    }
+                }
+            }
+        }
+
+        if (selectedFilter == FilterCategory.HIDDEN) {
+            item {
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 4.dp),
+                    shape = RoundedCornerShape(16.dp),
+                    colors = CardDefaults.cardColors(containerColor = SurfaceContainerDark),
+                    border = BorderStroke(1.dp, TertiaryAmber.copy(alpha = 0.35f))
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(14.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
+                            Box(
+                                modifier = Modifier
+                                    .size(40.dp)
+                                    .clip(CircleShape)
+                                    .background(TertiaryAmber.copy(alpha = 0.15f)),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Shield,
+                                    contentDescription = null,
+                                    tint = TertiaryAmber,
+                                    modifier = Modifier.size(22.dp)
+                                )
+                            }
+                            Spacer(modifier = Modifier.width(12.dp))
+                            Column {
+                                Text(
+                                    "Private Safe Active",
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 14.sp,
+                                    color = OnSurfaceDark
+                                )
+                                Text(
+                                    "${filteredVideos.size} files hidden from gallery",
+                                    fontSize = 11.sp,
+                                    color = OnSurfaceVariantDark
+                                )
+                            }
+                        }
+
+                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            TextButton(
+                                onClick = onChangePinRequested,
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                            ) {
+                                Text("Change PIN", color = TertiaryAmber, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                            }
+                            Button(
+                                onClick = {
+                                    viewModel.lockVault()
+                                    viewModel.setFilterCategory(FilterCategory.ALL_FOLDERS)
+                                },
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = TertiaryAmber,
+                                    contentColor = OnTertiaryAmber
+                                ),
+                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                shape = RoundedCornerShape(8.dp)
+                            ) {
+                                Icon(Icons.Default.Lock, contentDescription = null, modifier = Modifier.size(14.dp))
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text("Lock", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                            }
                         }
                     }
                 }
@@ -757,8 +1098,12 @@ fun LocalLibraryContent(
                         Text(selectedFolder, color = OnSurfaceDark, fontWeight = FontWeight.Bold, fontSize = 17.sp)
                     } else {
                         Text(
-                            if (selectedFilter == FilterCategory.ALL_FOLDERS) "Folders" else "Videos",
-                            color = OnSurfaceDark,
+                            when (selectedFilter) {
+                                FilterCategory.ALL_FOLDERS -> "Folders"
+                                FilterCategory.HIDDEN -> "Protected Files"
+                                else -> "Videos"
+                            },
+                            color = if (selectedFilter == FilterCategory.HIDDEN) TertiaryAmber else OnSurfaceDark,
                             fontWeight = FontWeight.Bold,
                             fontSize = 17.sp
                         )
@@ -779,6 +1124,33 @@ fun LocalLibraryContent(
                 }
 
                 Row(verticalAlignment = Alignment.CenterVertically) {
+                    if (selectedFolder != null) {
+                        Surface(
+                            onClick = { onLockToggleFolder(selectedFolder) },
+                            shape = RoundedCornerShape(8.dp),
+                            color = TertiaryContainerAmber.copy(alpha = 0.85f),
+                            modifier = Modifier.padding(end = 8.dp)
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                            ) {
+                                Icon(
+                                    Icons.Default.Lock,
+                                    contentDescription = "Hide entire folder",
+                                    tint = OnTertiaryAmber,
+                                    modifier = Modifier.size(13.dp)
+                                )
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text(
+                                    "Hide Folder",
+                                    color = OnTertiaryAmber,
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        }
+                    }
                     IconButton(onClick = onToggleGridView, modifier = Modifier.size(32.dp)) {
                         Icon(
                             if (isGridView) Icons.Default.ViewAgenda else Icons.Default.GridView,
@@ -803,10 +1175,59 @@ fun LocalLibraryContent(
                     ) {
                         for (folder in rowFolders) {
                             Box(modifier = Modifier.weight(1f)) {
-                                FolderGridCard(
-                                    folder = folder,
-                                    imageLoader = imageLoader,
-                                    onClick = { onFolderSelected(folder.name) }
+                                val dismissState = rememberSwipeToDismissBoxState(
+                                    confirmValueChange = {
+                                        if (it == SwipeToDismissBoxValue.EndToStart) {
+                                            onLockToggleFolder(folder.name)
+                                            false
+                                        } else false
+                                    }
+                                )
+
+                                SwipeToDismissBox(
+                                    state = dismissState,
+                                    enableDismissFromStartToEnd = false,
+                                    enableDismissFromEndToStart = true,
+                                    backgroundContent = {
+                                        val isDismissing = dismissState.dismissDirection == SwipeToDismissBoxValue.EndToStart
+                                        if (isDismissing) {
+                                            Box(
+                                                modifier = Modifier
+                                                    .fillMaxSize()
+                                                    .clip(RoundedCornerShape(12.dp))
+                                                    .background(TertiaryContainerAmber)
+                                                    .padding(horizontal = 14.dp),
+                                                contentAlignment = Alignment.CenterEnd
+                                            ) {
+                                                Column(
+                                                    horizontalAlignment = Alignment.CenterHorizontally,
+                                                    verticalArrangement = Arrangement.Center
+                                                ) {
+                                                    Icon(
+                                                        Icons.Default.Lock,
+                                                        contentDescription = "Hide folder",
+                                                        tint = OnTertiaryAmber,
+                                                        modifier = Modifier.size(20.dp)
+                                                    )
+                                                    Spacer(modifier = Modifier.height(2.dp))
+                                                    Text(
+                                                        "Hide",
+                                                        color = OnTertiaryAmber,
+                                                        fontSize = 10.sp,
+                                                        fontWeight = FontWeight.Bold
+                                                    )
+                                                }
+                                            }
+                                        }
+                                    },
+                                    content = {
+                                        FolderGridCard(
+                                            folder = folder,
+                                            imageLoader = imageLoader,
+                                            onClick = { onFolderSelected(folder.name) },
+                                            onLockFolder = { onLockToggleFolder(folder.name) }
+                                        )
+                                    }
                                 )
                             }
                         }
@@ -817,10 +1238,62 @@ fun LocalLibraryContent(
                 }
             } else {
                 items(folders, key = { it.name }) { folder ->
-                    FolderListItem(
-                        folder = folder,
-                        imageLoader = imageLoader,
-                        onClick = { onFolderSelected(folder.name) }
+                    val dismissState = rememberSwipeToDismissBoxState(
+                        confirmValueChange = {
+                            if (it == SwipeToDismissBoxValue.EndToStart) {
+                                onLockToggleFolder(folder.name)
+                                false
+                            } else false
+                        }
+                    )
+
+                    SwipeToDismissBox(
+                        state = dismissState,
+                        enableDismissFromStartToEnd = false,
+                        enableDismissFromEndToStart = true,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 4.dp),
+                        backgroundContent = {
+                            val isDismissing = dismissState.dismissDirection == SwipeToDismissBoxValue.EndToStart
+                            if (isDismissing) {
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxSize()
+                                        .clip(RoundedCornerShape(12.dp))
+                                        .background(TertiaryContainerAmber)
+                                        .padding(horizontal = 20.dp),
+                                    contentAlignment = Alignment.CenterEnd
+                                ) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                    ) {
+                                        Text(
+                                            "Hide Folder",
+                                            color = OnTertiaryAmber,
+                                            fontWeight = FontWeight.Bold,
+                                            fontSize = 13.sp
+                                        )
+                                        Icon(
+                                            Icons.Default.Lock,
+                                            contentDescription = "Hide folder to safe",
+                                            tint = OnTertiaryAmber,
+                                            modifier = Modifier.size(20.dp)
+                                        )
+                                    }
+                                }
+                            }
+                        },
+                        content = {
+                            FolderListItem(
+                                folder = folder,
+                                imageLoader = imageLoader,
+                                onClick = { onFolderSelected(folder.name) },
+                                onLockFolder = { onLockToggleFolder(folder.name) },
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                        }
                     )
                 }
             }
@@ -830,13 +1303,47 @@ fun LocalLibraryContent(
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(40.dp),
+                            .padding(horizontal = 24.dp, vertical = 40.dp),
                         contentAlignment = Alignment.Center
                     ) {
-                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                            Icon(Icons.Default.FolderOff, contentDescription = null, tint = OutlineDark, modifier = Modifier.size(48.dp))
-                            Spacer(modifier = Modifier.height(12.dp))
-                            Text("No videos found", color = OnSurfaceVariantDark, fontSize = 14.sp)
+                        if (selectedFilter == FilterCategory.HIDDEN) {
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(64.dp)
+                                        .clip(CircleShape)
+                                        .background(TertiaryAmber.copy(alpha = 0.15f)),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Lock,
+                                        contentDescription = null,
+                                        tint = TertiaryAmber,
+                                        modifier = Modifier.size(32.dp)
+                                    )
+                                }
+                                Spacer(modifier = Modifier.height(16.dp))
+                                Text(
+                                    "No hidden videos in vault",
+                                    color = OnSurfaceDark,
+                                    fontSize = 16.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                Spacer(modifier = Modifier.height(6.dp))
+                                Text(
+                                    "Swipe left or tap the lock button on any video or folder to move it into your Private Safe.",
+                                    color = OnSurfaceVariantDark,
+                                    fontSize = 12.sp,
+                                    lineHeight = 17.sp,
+                                    textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                                )
+                            }
+                        } else {
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                Icon(Icons.Default.FolderOff, contentDescription = null, tint = OutlineDark, modifier = Modifier.size(48.dp))
+                                Spacer(modifier = Modifier.height(12.dp))
+                                Text("No videos found", color = OnSurfaceVariantDark, fontSize = 14.sp)
+                            }
                         }
                     }
                 }
@@ -851,13 +1358,66 @@ fun LocalLibraryContent(
                     ) {
                         for (video in rowVideos) {
                             Box(modifier = Modifier.weight(1f)) {
-                                VideoGridCard(
-                                    video = video,
-                                    imageLoader = imageLoader,
-                                    onClick = { onVideoSelected(video) },
-                                    onLongClick = { onVideoLongClick(video) },
-                                    onDeleteClick = { onDeleteRequested(video) },
-                                    onInfoClick = { onInfoRequested(video) }
+                                val isLocked = hiddenVideoUris.contains(video.uri.toString())
+                                val dismissState = rememberSwipeToDismissBoxState(
+                                    confirmValueChange = {
+                                        if (it == SwipeToDismissBoxValue.EndToStart) {
+                                            onLockToggle(video)
+                                            false
+                                        } else false
+                                    }
+                                )
+
+                                SwipeToDismissBox(
+                                    state = dismissState,
+                                    enableDismissFromStartToEnd = false,
+                                    enableDismissFromEndToStart = true,
+                                    backgroundContent = {
+                                        val isDismissing = dismissState.dismissDirection == SwipeToDismissBoxValue.EndToStart
+                                        if (isDismissing) {
+                                            Box(
+                                                modifier = Modifier
+                                                    .fillMaxSize()
+                                                    .clip(RoundedCornerShape(12.dp))
+                                                    .background(
+                                                        if (isLocked) SurfaceContainerHighestDark else TertiaryContainerAmber
+                                                    )
+                                                    .padding(horizontal = 14.dp),
+                                                contentAlignment = Alignment.CenterEnd
+                                            ) {
+                                                Column(
+                                                    horizontalAlignment = Alignment.CenterHorizontally,
+                                                    verticalArrangement = Arrangement.Center
+                                                ) {
+                                                    Icon(
+                                                        imageVector = if (isLocked) Icons.Default.LockOpen else Icons.Default.Lock,
+                                                        contentDescription = if (isLocked) "Unhide" else "Hide",
+                                                        tint = if (isLocked) PrimaryCyan else OnTertiaryAmber,
+                                                        modifier = Modifier.size(20.dp)
+                                                    )
+                                                    Spacer(modifier = Modifier.height(2.dp))
+                                                    Text(
+                                                        text = if (isLocked) "Unhide" else "Hide",
+                                                        color = if (isLocked) PrimaryCyan else OnTertiaryAmber,
+                                                        fontSize = 10.sp,
+                                                        fontWeight = FontWeight.Bold
+                                                    )
+                                                }
+                                            }
+                                        }
+                                    },
+                                    content = {
+                                        VideoGridCard(
+                                            video = video,
+                                            imageLoader = imageLoader,
+                                            isLocked = isLocked,
+                                            onClick = { onVideoSelected(video) },
+                                            onLongClick = { onVideoLongClick(video) },
+                                            onDeleteClick = { onDeleteRequested(video) },
+                                            onInfoClick = { onInfoRequested(video) },
+                                            onLockToggle = { onLockToggle(video) }
+                                        )
+                                    }
                                 )
                             }
                         }
@@ -868,10 +1428,11 @@ fun LocalLibraryContent(
                 }
             } else {
                 items(filteredVideos, key = { it.id }) { video ->
+                    val isLocked = hiddenVideoUris.contains(video.uri.toString())
                     val dismissState = rememberSwipeToDismissBoxState(
                         confirmValueChange = {
                             if (it == SwipeToDismissBoxValue.EndToStart) {
-                                onDeleteRequested(video)
+                                onLockToggle(video)
                                 false
                             } else false
                         }
@@ -880,6 +1441,7 @@ fun LocalLibraryContent(
                     SwipeToDismissBox(
                         state = dismissState,
                         enableDismissFromStartToEnd = false,
+                        enableDismissFromEndToStart = true,
                         modifier = Modifier
                             .fillMaxWidth()
                             .padding(horizontal = 16.dp, vertical = 4.dp),
@@ -890,11 +1452,29 @@ fun LocalLibraryContent(
                                     modifier = Modifier
                                         .fillMaxSize()
                                         .clip(RoundedCornerShape(12.dp))
-                                        .background(ErrorContainerDark)
+                                        .background(
+                                            if (isLocked) SurfaceContainerHighestDark else TertiaryContainerAmber
+                                        )
                                         .padding(horizontal = 20.dp),
                                     contentAlignment = Alignment.CenterEnd
                                 ) {
-                                    Icon(Icons.Default.Delete, contentDescription = "Delete", tint = OnErrorContainerDark)
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                    ) {
+                                        Text(
+                                            if (isLocked) "Unhide Video" else "Hide Video",
+                                            color = if (isLocked) PrimaryCyan else OnTertiaryAmber,
+                                            fontWeight = FontWeight.Bold,
+                                            fontSize = 13.sp
+                                        )
+                                        Icon(
+                                            if (isLocked) Icons.Default.LockOpen else Icons.Default.Lock,
+                                            contentDescription = if (isLocked) "Unhide video" else "Hide video to safe",
+                                            tint = if (isLocked) PrimaryCyan else OnTertiaryAmber,
+                                            modifier = Modifier.size(20.dp)
+                                        )
+                                    }
                                 }
                             }
                         },
@@ -902,10 +1482,12 @@ fun LocalLibraryContent(
                             VideoListItemCard(
                                 video = video,
                                 imageLoader = imageLoader,
+                                isLocked = isLocked,
                                 onClick = { onVideoSelected(video) },
                                 onLongClick = { onVideoLongClick(video) },
                                 onDeleteClick = { onDeleteRequested(video) },
-                                onInfoClick = { onInfoRequested(video) }
+                                onInfoClick = { onInfoRequested(video) },
+                                onLockToggle = { onLockToggle(video) }
                             )
                         }
                     )
@@ -966,10 +1548,12 @@ fun FilterChipItem(
 fun ContinueWatchingCard(
     video: VideoItem,
     imageLoader: ImageLoader,
+    isLocked: Boolean = false,
     onClick: () -> Unit,
     onLongClick: () -> Unit = {},
     onDeleteClick: () -> Unit = {},
-    onInfoClick: () -> Unit = {}
+    onInfoClick: () -> Unit = {},
+    onLockToggle: () -> Unit = {}
 ) {
     val haptic = LocalHapticFeedback.current
     var showMenu by remember { mutableStateOf(false) }
@@ -1035,6 +1619,25 @@ fun ContinueWatchingCard(
                             fontWeight = FontWeight.Bold,
                             modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp)
                         )
+                    }
+                }
+
+                if (isLocked) {
+                    Surface(
+                        shape = RoundedCornerShape(4.dp),
+                        color = SurfaceContainerLowestDark.copy(alpha = 0.9f),
+                        modifier = Modifier
+                            .align(Alignment.TopEnd)
+                            .padding(8.dp)
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp)
+                        ) {
+                            Icon(Icons.Default.Lock, contentDescription = null, tint = TertiaryAmber, modifier = Modifier.size(11.dp))
+                            Spacer(modifier = Modifier.width(3.dp))
+                            Text("Safe", color = TertiaryAmber, fontSize = 9.sp, fontWeight = FontWeight.Bold)
+                        }
                     }
                 }
 
@@ -1120,6 +1723,20 @@ fun ContinueWatchingCard(
                                 }
                             )
                             DropdownMenuItem(
+                                text = { Text(if (isLocked) "Unhide Video" else "Lock & Hide Video", color = TertiaryAmber) },
+                                leadingIcon = {
+                                    Icon(
+                                        if (isLocked) Icons.Default.LockOpen else Icons.Default.Lock,
+                                        contentDescription = null,
+                                        tint = TertiaryAmber
+                                    )
+                                },
+                                onClick = {
+                                    showMenu = false
+                                    onLockToggle()
+                                }
+                            )
+                            DropdownMenuItem(
                                 text = { Text("Details", color = OnSurfaceDark) },
                                 leadingIcon = { Icon(Icons.Default.Info, contentDescription = null, tint = OnSurfaceVariantDark) },
                                 onClick = {
@@ -1169,15 +1786,15 @@ fun ContinueWatchingCard(
 fun FolderListItem(
     folder: VideoFolder,
     imageLoader: ImageLoader,
-    onClick: () -> Unit
+    onClick: () -> Unit,
+    onLockFolder: () -> Unit = {},
+    modifier: Modifier = Modifier
 ) {
     Card(
         onClick = onClick,
         shape = RoundedCornerShape(12.dp),
         colors = CardDefaults.cardColors(containerColor = SurfaceContainerDark),
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 4.dp)
+        modifier = modifier.fillMaxWidth()
     ) {
         Row(
             modifier = Modifier
@@ -1287,12 +1904,25 @@ fun FolderListItem(
                 }
             }
 
-            Icon(
-                Icons.AutoMirrored.Filled.ArrowForward,
-                contentDescription = "Open",
-                tint = OnSurfaceVariantDark,
-                modifier = Modifier.size(18.dp)
-            )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                IconButton(
+                    onClick = onLockFolder,
+                    modifier = Modifier.size(32.dp)
+                ) {
+                    Icon(
+                        Icons.Default.Lock,
+                        contentDescription = "Hide folder to safe",
+                        tint = TertiaryAmber,
+                        modifier = Modifier.size(17.dp)
+                    )
+                }
+                Icon(
+                    Icons.AutoMirrored.Filled.ArrowForward,
+                    contentDescription = "Open",
+                    tint = OnSurfaceVariantDark,
+                    modifier = Modifier.size(18.dp)
+                )
+            }
         }
     }
 }
@@ -1301,7 +1931,8 @@ fun FolderListItem(
 fun FolderGridCard(
     folder: VideoFolder,
     imageLoader: ImageLoader,
-    onClick: () -> Unit
+    onClick: () -> Unit,
+    onLockFolder: () -> Unit = {}
 ) {
     Card(
         onClick = onClick,
@@ -1369,21 +2000,41 @@ fun FolderGridCard(
                     }
                 }
 
-                if (folder.isNew) {
+                Row(
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(6.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    if (folder.isNew) {
+                        Surface(
+                            shape = RoundedCornerShape(4.dp),
+                            color = TertiaryContainerAmber,
+                            modifier = Modifier.padding(end = 4.dp)
+                        ) {
+                            Text(
+                                "NEW",
+                                color = OnTertiaryAmber,
+                                fontSize = 8.sp,
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
+                            )
+                        }
+                    }
                     Surface(
-                        shape = RoundedCornerShape(4.dp),
-                        color = TertiaryContainerAmber,
-                        modifier = Modifier
-                            .align(Alignment.TopEnd)
-                            .padding(6.dp)
+                        onClick = onLockFolder,
+                        shape = CircleShape,
+                        color = SurfaceContainerLowestDark.copy(alpha = 0.85f),
+                        modifier = Modifier.size(26.dp)
                     ) {
-                        Text(
-                            "NEW",
-                            color = OnTertiaryAmber,
-                            fontSize = 8.sp,
-                            fontWeight = FontWeight.Bold,
-                            modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
-                        )
+                        Box(contentAlignment = Alignment.Center) {
+                            Icon(
+                                Icons.Default.Lock,
+                                contentDescription = "Hide folder to safe",
+                                tint = TertiaryAmber,
+                                modifier = Modifier.size(13.dp)
+                            )
+                        }
                     }
                 }
             }
@@ -1423,10 +2074,12 @@ fun VideoListItemCard(
     video: VideoItem,
     imageLoader: ImageLoader,
     modifier: Modifier = Modifier,
+    isLocked: Boolean = false,
     onClick: () -> Unit,
     onLongClick: () -> Unit = {},
     onDeleteClick: () -> Unit = {},
-    onInfoClick: () -> Unit = {}
+    onInfoClick: () -> Unit = {},
+    onLockToggle: () -> Unit = {}
 ) {
     val haptic = LocalHapticFeedback.current
     var showMenu by remember { mutableStateOf(false) }
@@ -1468,6 +2121,21 @@ fun VideoListItemCard(
                     modifier = Modifier.fillMaxSize()
                 )
 
+                if (isLocked) {
+                    Surface(
+                        shape = RoundedCornerShape(3.dp),
+                        color = SurfaceContainerLowestDark.copy(alpha = 0.85f),
+                        modifier = Modifier.align(Alignment.TopStart).padding(3.dp)
+                    ) {
+                        Icon(
+                            Icons.Default.Lock,
+                            contentDescription = "Hidden in Vault",
+                            tint = TertiaryAmber,
+                            modifier = Modifier.size(12.dp).padding(1.dp)
+                        )
+                    }
+                }
+
                 Surface(
                     shape = RoundedCornerShape(3.dp),
                     color = SurfaceContainerLowestDark.copy(alpha = 0.85f),
@@ -1508,6 +2176,21 @@ fun VideoListItemCard(
                             modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
                         )
                     }
+                    if (isLocked) {
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Surface(
+                            shape = RoundedCornerShape(3.dp),
+                            color = TertiaryContainerAmber
+                        ) {
+                            Text(
+                                "SAFE",
+                                color = OnTertiaryAmber,
+                                fontSize = 8.sp,
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
+                            )
+                        }
+                    }
                     Spacer(modifier = Modifier.width(6.dp))
                     Text(formatFileSize(video.size), color = OnSurfaceVariantDark, fontSize = 11.sp)
                 }
@@ -1542,6 +2225,20 @@ fun VideoListItemCard(
                             }
                         )
                         DropdownMenuItem(
+                            text = { Text(if (isLocked) "Unhide Video" else "Lock & Hide Video", color = TertiaryAmber) },
+                            leadingIcon = {
+                                Icon(
+                                    if (isLocked) Icons.Default.LockOpen else Icons.Default.Lock,
+                                    contentDescription = null,
+                                    tint = TertiaryAmber
+                                )
+                            },
+                            onClick = {
+                                showMenu = false
+                                onLockToggle()
+                            }
+                        )
+                        DropdownMenuItem(
                             text = { Text("Details", color = OnSurfaceDark) },
                             leadingIcon = { Icon(Icons.Default.Info, contentDescription = null, tint = OnSurfaceVariantDark) },
                             onClick = {
@@ -1569,10 +2266,12 @@ fun VideoListItemCard(
 fun VideoGridCard(
     video: VideoItem,
     imageLoader: ImageLoader,
+    isLocked: Boolean = false,
     onClick: () -> Unit,
     onLongClick: () -> Unit = {},
     onDeleteClick: () -> Unit = {},
-    onInfoClick: () -> Unit = {}
+    onInfoClick: () -> Unit = {},
+    onLockToggle: () -> Unit = {}
 ) {
     val haptic = LocalHapticFeedback.current
     var showMenu by remember { mutableStateOf(false) }
@@ -1626,6 +2325,26 @@ fun VideoGridCard(
                             fontWeight = FontWeight.Bold,
                             modifier = Modifier.padding(horizontal = 3.dp, vertical = 1.dp)
                         )
+                    }
+                    if (isLocked) {
+                        Surface(
+                            shape = RoundedCornerShape(3.dp),
+                            color = TertiaryContainerAmber
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.padding(horizontal = 3.dp, vertical = 1.dp)
+                            ) {
+                                Icon(Icons.Default.Lock, contentDescription = null, tint = OnTertiaryAmber, modifier = Modifier.size(9.dp))
+                                Spacer(modifier = Modifier.width(2.dp))
+                                Text(
+                                    "SAFE",
+                                    color = OnTertiaryAmber,
+                                    fontSize = 8.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        }
                     }
                 }
 
@@ -1689,6 +2408,20 @@ fun VideoGridCard(
                                 }
                             )
                             DropdownMenuItem(
+                                text = { Text(if (isLocked) "Unhide Video" else "Lock & Hide Video", color = TertiaryAmber) },
+                                leadingIcon = {
+                                    Icon(
+                                        if (isLocked) Icons.Default.LockOpen else Icons.Default.Lock,
+                                        contentDescription = null,
+                                        tint = TertiaryAmber
+                                    )
+                                },
+                                onClick = {
+                                    showMenu = false
+                                    onLockToggle()
+                                }
+                            )
+                            DropdownMenuItem(
                                 text = { Text("Details", color = OnSurfaceDark) },
                                 leadingIcon = { Icon(Icons.Default.Info, contentDescription = null, tint = OnSurfaceVariantDark) },
                                 onClick = {
@@ -1723,11 +2456,13 @@ fun RecentWatchHistoryContent(
     continueWatching: List<VideoItem>,
     videos: List<VideoItem>,
     imageLoader: ImageLoader,
+    hiddenVideoUris: Set<String> = emptySet(),
     onClearHistory: () -> Unit,
     onVideoSelected: (VideoItem) -> Unit,
     onVideoLongClick: (VideoItem) -> Unit = {},
     onDeleteRequested: (VideoItem) -> Unit = {},
-    onInfoRequested: (VideoItem) -> Unit = {}
+    onInfoRequested: (VideoItem) -> Unit = {},
+    onLockToggle: (VideoItem) -> Unit = {}
 ) {
     var showClearConfirmDialog by remember { mutableStateOf(false) }
 
@@ -1873,13 +2608,66 @@ fun RecentWatchHistoryContent(
             }
         } else {
             items(continueWatching, key = { it.id }) { video ->
-                VideoListItemCard(
-                    video = video,
-                    imageLoader = imageLoader,
-                    onClick = { onVideoSelected(video) },
-                    onLongClick = { onVideoLongClick(video) },
-                    onDeleteClick = { onDeleteRequested(video) },
-                    onInfoClick = { onInfoRequested(video) }
+                val isLocked = hiddenVideoUris.contains(video.uri.toString())
+                val dismissState = rememberSwipeToDismissBoxState(
+                    confirmValueChange = {
+                        if (it == SwipeToDismissBoxValue.EndToStart) {
+                            onLockToggle(video)
+                            false
+                        } else false
+                    }
+                )
+
+                SwipeToDismissBox(
+                    state = dismissState,
+                    enableDismissFromStartToEnd = false,
+                    enableDismissFromEndToStart = true,
+                    modifier = Modifier.fillMaxWidth(),
+                    backgroundContent = {
+                        val isDismissing = dismissState.dismissDirection == SwipeToDismissBoxValue.EndToStart
+                        if (isDismissing) {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .background(
+                                        if (isLocked) SurfaceContainerHighestDark else TertiaryContainerAmber
+                                    )
+                                    .padding(horizontal = 20.dp),
+                                contentAlignment = Alignment.CenterEnd
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    Text(
+                                        if (isLocked) "Unhide Video" else "Hide Video",
+                                        color = if (isLocked) PrimaryCyan else OnTertiaryAmber,
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 13.sp
+                                    )
+                                    Icon(
+                                        if (isLocked) Icons.Default.LockOpen else Icons.Default.Lock,
+                                        contentDescription = if (isLocked) "Unhide video" else "Hide video to safe",
+                                        tint = if (isLocked) PrimaryCyan else OnTertiaryAmber,
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                }
+                            }
+                        }
+                    },
+                    content = {
+                        VideoListItemCard(
+                            video = video,
+                            imageLoader = imageLoader,
+                            isLocked = isLocked,
+                            onClick = { onVideoSelected(video) },
+                            onLongClick = { onVideoLongClick(video) },
+                            onDeleteClick = { onDeleteRequested(video) },
+                            onInfoClick = { onInfoRequested(video) },
+                            onLockToggle = { onLockToggle(video) }
+                        )
+                    }
                 )
             }
         }
@@ -2023,6 +2811,8 @@ fun DeleteVideoDialog(
 @Composable
 fun VideoDetailsDialog(
     video: VideoItem,
+    isLocked: Boolean = false,
+    onLockToggle: () -> Unit = {},
     onDismiss: () -> Unit
 ) {
     AlertDialog(
@@ -2047,6 +2837,31 @@ fun VideoDetailsDialog(
                 DetailRow(label = "File Size", value = formatFileSize(video.size))
                 DetailRow(label = "Folder", value = video.bucketName)
                 DetailRow(label = "Decoder", value = "HW+ / HW / SW Accelerated")
+                DetailRow(
+                    label = "Vault Status",
+                    value = if (isLocked) "Hidden in Private Safe" else "Public in Media Library"
+                )
+            }
+        },
+        dismissButton = {
+            FilledTonalButton(
+                onClick = {
+                    onLockToggle()
+                    onDismiss()
+                },
+                colors = ButtonDefaults.filledTonalButtonColors(
+                    containerColor = if (isLocked) SurfaceContainerHighestDark else TertiaryContainerAmber,
+                    contentColor = if (isLocked) PrimaryCyan else OnTertiaryAmber
+                ),
+                shape = RoundedCornerShape(10.dp)
+            ) {
+                Icon(
+                    if (isLocked) Icons.Default.LockOpen else Icons.Default.Lock,
+                    contentDescription = null,
+                    modifier = Modifier.size(16.dp)
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                Text(if (isLocked) "Unhide Video" else "Lock & Hide", fontWeight = FontWeight.Bold)
             }
         },
         confirmButton = {

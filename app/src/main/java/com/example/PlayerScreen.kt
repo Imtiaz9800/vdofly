@@ -46,6 +46,10 @@ import androidx.compose.material.icons.filled.VolumeOff
 import android.app.PictureInPictureParams
 import android.os.Build
 import android.util.Rational
+import androidx.activity.compose.BackHandler
+import androidx.compose.animation.*
+import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.LockOpen
 import androidx.compose.material.icons.filled.PictureInPictureAlt
 import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.Timer
@@ -61,6 +65,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
@@ -169,6 +174,20 @@ fun PlayerScreen(
     var duration by remember { mutableStateOf(0L) }
     var isSeeking by remember { mutableStateOf(false) }
     var currentSpeed by remember { mutableStateOf(1f) }
+    var isScreenLocked by remember { mutableStateOf(false) }
+    var isUnlockButtonVisible by remember { mutableStateOf(false) }
+
+    LaunchedEffect(isScreenLocked, isUnlockButtonVisible) {
+        if (isScreenLocked && isUnlockButtonVisible) {
+            delay(3500L)
+            isUnlockButtonVisible = false
+        }
+    }
+
+    BackHandler(enabled = isScreenLocked) {
+        // When screen is locked, back button reveals the unlock button
+        isUnlockButtonVisible = true
+    }
 
     LaunchedEffect(sleepTimerMinutes) {
         if (sleepTimerMinutes > 0) {
@@ -300,9 +319,57 @@ fun PlayerScreen(
         )
 
         // Overlay for gestures
-        GestureOverlay(exoPlayer, onTap = { isControlsVisible = !isControlsVisible })
+        GestureOverlay(
+            exoPlayer = exoPlayer,
+            isScreenLocked = isScreenLocked,
+            onLockedTap = { isUnlockButtonVisible = !isUnlockButtonVisible },
+            onTap = { isControlsVisible = !isControlsVisible }
+        )
+
+        // Floating Unlock Button when Screen is Locked
+        AnimatedVisibility(
+            visible = isScreenLocked && isUnlockButtonVisible,
+            enter = fadeIn() + scaleIn(),
+            exit = fadeOut() + scaleOut(),
+            modifier = Modifier
+                .align(Alignment.TopStart)
+                .statusBarsPadding()
+                .padding(start = 24.dp, top = 24.dp)
+        ) {
+            Surface(
+                onClick = {
+                    isScreenLocked = false
+                    isControlsVisible = true
+                    isUnlockButtonVisible = false
+                    Toast.makeText(context, "Controls unlocked", Toast.LENGTH_SHORT).show()
+                },
+                shape = CircleShape,
+                color = Color.Black.copy(alpha = 0.85f),
+                border = BorderStroke(2.dp, Color(0xFF00E5FF)),
+                shadowElevation = 12.dp
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.padding(horizontal = 18.dp, vertical = 10.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.Lock,
+                        contentDescription = "Unlock Screen",
+                        tint = Color(0xFF00E5FF),
+                        modifier = Modifier.size(20.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        "Tap to Unlock",
+                        color = Color.White,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            }
+        }
         
-        if (isControlsVisible) {
+        if (isControlsVisible && !isScreenLocked) {
             val currentVideo = videos.getOrNull(currentMediaIndex)
             val currentTitle = currentVideo?.name ?: (exoPlayer.currentMediaItem?.mediaMetadata?.title?.toString() ?: "Playing Video")
             val currentSubtitle = buildString {
@@ -377,6 +444,12 @@ fun PlayerScreen(
                         }
                         activity?.enterPictureInPictureMode(pipParams.build())
                     }
+                },
+                onLockScreen = {
+                    isScreenLocked = true
+                    isControlsVisible = false
+                    isUnlockButtonVisible = true
+                    Toast.makeText(context, "Screen locked. Tap to unlock.", Toast.LENGTH_SHORT).show()
                 },
                 onBack = {
                     activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
@@ -709,6 +782,7 @@ fun ControlsOverlay(
     onAudioTrack: () -> Unit,
     onSleepTimer: () -> Unit,
     onPip: () -> Unit,
+    onLockScreen: () -> Unit = {},
     onBack: () -> Unit
 ) {
     Box(modifier = Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.5f))) {
@@ -839,6 +913,13 @@ fun ControlsOverlay(
                             )
                         }
                     }
+                    IconButton(onClick = onLockScreen) {
+                        Icon(
+                            imageVector = Icons.Filled.LockOpen,
+                            contentDescription = "Lock Screen Controls",
+                            tint = Color.White
+                        )
+                    }
                 }
             }
         }
@@ -918,7 +999,25 @@ fun ControlsOverlay(
 enum class DragType { NONE, HORIZONTAL_SEEK, VERTICAL_BRIGHTNESS, VERTICAL_VOLUME }
 
 @Composable
-fun GestureOverlay(exoPlayer: ExoPlayer, onTap: () -> Unit) {
+fun GestureOverlay(
+    exoPlayer: ExoPlayer,
+    isScreenLocked: Boolean = false,
+    onLockedTap: () -> Unit = {},
+    onTap: () -> Unit
+) {
+    if (isScreenLocked) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .pointerInput(Unit) {
+                    detectTapGestures(
+                        onTap = { onLockedTap() }
+                    )
+                }
+        )
+        return
+    }
+
     val context = LocalContext.current
     val audioManager = remember { context.getSystemService(Context.AUDIO_SERVICE) as AudioManager }
     val maxVolume = remember { audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC).coerceAtLeast(1) }
